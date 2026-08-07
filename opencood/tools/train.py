@@ -6,7 +6,6 @@
 import argparse
 import os
 import random
-import statistics
 
 import numpy as np
 import torch
@@ -53,8 +52,11 @@ def main():
         np.random.seed(process_seed)
         torch.manual_seed(process_seed)
         torch.cuda.manual_seed_all(process_seed)
+        hypes['train_params']['seed'] = opt.seed
         print('Using base seed %d (process seed %d)' %
               (opt.seed, process_seed))
+
+    is_main_process = not opt.distributed or opt.rank == 0
 
     print('-----------------Dataset Building------------------')
     if opt.dataset_name == 'opv2v':
@@ -109,9 +111,15 @@ def main():
 
     else:
         init_epoch = 0
-        # if we train the model from scratch, we need to create a folder
-        # to save the model,
-        saved_path = train_utils.setup_train(hypes)
+        # Only rank 0 creates the run directory and writes config.yaml.
+        # Broadcast the exact path so all DDP ranks refer to the same run.
+        saved_path = train_utils.setup_train(hypes) \
+            if is_main_process else None
+        if opt.distributed:
+            saved_path_list = [saved_path]
+            torch.distributed.broadcast_object_list(saved_path_list, src=0)
+            saved_path = saved_path_list[0]
+            torch.distributed.barrier()
 
     # we assume gpu is necessary
     if torch.cuda.is_available():
@@ -135,7 +143,7 @@ def main():
     scheduler = train_utils.setup_lr_schedular(hypes, optimizer, num_steps)
 
     # record training
-    writer = SummaryWriter(saved_path)
+    writer = SummaryWriter(saved_path) if is_main_process else None
 
     # half precision training
     if opt.half:
@@ -156,7 +164,8 @@ def main():
         if opt.distributed:
             sampler_train.set_epoch(epoch)
 
-        pbar2 = tqdm.tqdm(total=len(train_loader), leave=True)
+        pbar2 = tqdm.tqdm(total=len(train_loader), leave=True) \
+            if is_main_process else None
 
         for i, batch_data in enumerate(train_loader):
             # the model will be evaluation mode during validation
@@ -185,8 +194,10 @@ def main():
                                            batch_data['ego']['label_dict'])
 
 
-            criterion.logging(epoch, i, len(train_loader), writer, pbar=pbar2)
-            pbar2.update(1)
+            if is_main_process:
+                criterion.logging(epoch, i, len(train_loader), writer,
+                                  pbar=pbar2)
+                pbar2.update(1)
 
             if not opt.half:
                 final_loss.backward()
@@ -199,15 +210,19 @@ def main():
             if hypes['lr_scheduler']['core_method'] == 'cosineannealwarm':
                 scheduler.step_update(epoch * num_steps + i)
 
-        if epoch % hypes['train_params']['save_freq'] == 0:
+        if is_main_process and epoch % hypes['train_params']['save_freq'] == 0:
             torch.save(model_without_ddp.state_dict(),
                 os.path.join(saved_path, 'net_epoch%d.pth' % (epoch + 1)))
+        if opt.distributed:
+            torch.distributed.barrier()
 
         if epoch % hypes['train_params']['eval_freq'] == 0:
-            valid_ave_loss = []
+            valid_loss_sum = 0.0
+            valid_loss_count = 0
 
             with torch.no_grad():
-                for i, batch_data in tqdm.tqdm((enumerate(val_loader))):
+                for i, batch_data in tqdm.tqdm(
+                        enumerate(val_loader), disable=not is_main_process):
                     model.eval()
 
                     batch_data = train_utils.to_device(batch_data, device)
@@ -215,12 +230,27 @@ def main():
 
                     final_loss = criterion(ouput_dict,
                                            batch_data['ego']['label_dict'])
-                    valid_ave_loss.append(final_loss.item())
-            valid_ave_loss = statistics.mean(valid_ave_loss)
-            print('At epoch %d, the validation loss is %f' % (epoch,
-                                                              valid_ave_loss))
-            writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+                    valid_loss_sum += final_loss.item()
+                    valid_loss_count += 1
 
+            valid_loss_stats = torch.tensor(
+                [valid_loss_sum, valid_loss_count], device=device,
+                dtype=torch.float64,
+            )
+            if opt.distributed:
+                torch.distributed.all_reduce(valid_loss_stats)
+            valid_ave_loss = (valid_loss_stats[0] /
+                              valid_loss_stats[1]).item()
+            if is_main_process:
+                print('At epoch %d, the validation loss is %f' %
+                      (epoch, valid_ave_loss))
+                writer.add_scalar('Validate_Loss', valid_ave_loss, epoch)
+
+        if pbar2 is not None:
+            pbar2.close()
+
+    if writer is not None:
+        writer.close()
     print('Training Finished, checkpoints saved to %s' % saved_path)
 
 

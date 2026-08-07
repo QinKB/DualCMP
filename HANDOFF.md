@@ -4,7 +4,7 @@
 
 - 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
 - 验收标准：依赖和原生算子可导入；从随机初始化完成 CoBEVT 感知训练；由该自训感知模型生成 train/test 的检测、跟踪、轨迹和融合特征；随后完成 no-aggregation MTR 与 CMP 聚合模型训练，最终对自训 CMP checkpoint 做完整单卡评测。
-- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。第一次完整训练在第 3 个混合 CAV batch 暴露并定位了 collate 缺陷，修复后的同顺序 DDP smoke 已通过；一次修复后重启已越过该位置，但因原入口缺少全局随机种子，在 epoch 0 无 checkpoint 时有意停止。`--seed` 已加入并验证解析，待以 base seed 42 重启 80 epoch 训练。
+- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。第一次完整训练在第 3 个混合 CAV batch 暴露并定位了 collate 缺陷，修复后的同顺序 DDP smoke 已通过；后续两次 epoch 0 重启分别暴露了缺失全局 seed 与 DDP 验证/写 checkpoint 的记录缺陷，均在生成 epoch checkpoint 前有意停止并修复。现在 seed、run-dir、checkpoint 与验证指标聚合均已验证，待以 base seed 42 作最终 80 epoch 重启。
 
 ## 背景与动机
 
@@ -74,6 +74,7 @@
 - 首次 CoBEVT 80 epoch 训练在 epoch 0 第 3 个混合 CAV batch 以退出码 1 终止，未生成 epoch checkpoint。根因是 `collate_batch_train` 把只供 batch=1 tracking 推理使用、长度随 in-range CAV 数变化的 `ego_transformation_matrix` 列表做 `np.array`/stack；实际混合 batch 为 `[2,2,1,2]`，因而触发不等长数组错误。模型 forward 与检测 loss 对该字段均无读取路径。
 - 修复后，`collate_batch_train` 仅在 `len(batch)==1` 时保留与原先相同的 tensor `transformation_matrix_list`，多样本训练 batch 不再携带该未消费字段。用原训练的 `DistributedSampler.set_epoch(0)` 顺序在双卡真实模型上执行 3 次更新：rank 1 的第 3 个 batch 正是 `[2,2,1,2]`，两 rank 均完成前向、loss、反向和 step；159 个梯度张量均有限，峰值显存为 8722.7 MB。单样本 test collate 保持矩阵形状 `(1,1,4,4)`。
 - 修复后一次 CoBEVT 重新启动已正常越过第 38 个训练 step，GPU 利用率为 100%，显存约 18.7/19.4 GB，loss 有限；它在 epoch 0 尚未生成 checkpoint 时被有意停止，因为原 `opencood/tools/train.py` 没有对 Python、NumPy 和 PyTorch 设置训练随机种子。现已添加 `--seed`：每个 DDP process 使用 `base_seed + rank`（本次为 42/43），模型会在 DDP 建立时由 rank 0 同步参数，数据增强/worker 随机流则按 rank 分离。`--help` 与 `py_compile` 均已验证该入口。
+- seed=42 的后续重启正常运行至第 337 step（loss 仍有限），但审计发现验证循环将 rank 0 的半个 test sampler 均值直接写为全量验证 loss，且两个 rank 会竞争创建 run-dir/config 与写同一 `net_epoch*.pth`。该运行也在 epoch 0、无 checkpoint 时有意停止。现在只有 rank 0 创建目录、写 config/TensorBoard/checkpoint，目录通过 DDP object broadcast 传给另一 rank；每个 epoch checkpoint 写完后 barrier；验证 loss 按 `sum(loss) / count` 的 float64 all-reduce 聚合。双卡最小测试实际验证了路径 broadcast 和 loss sum/count all-reduce，两个 rank 都得到路径一致和全局均值 1.5。
 
 ## 修改内容
 
@@ -87,6 +88,7 @@
 - `MTR/mtr/datasets/v2v4real_multiego_dataset.py`：拒绝不受支持的 batch_size>1，避免静默丢弃场景。
 - `opencood/data_utils/v2v4real/datasets/intermediate_fusion_dataset_multi_ego.py`：训练时不堆叠不等长且不参与模型/loss 的 tracking 变换矩阵；仍为 batch-size-one 推理保留原有 tensor 接口。
 - `opencood/tools/train.py`：增加 `--seed`，在建立 dataset/model 前初始化 Python、NumPy 与 PyTorch 的每-rank 随机状态。
+- `opencood/tools/train.py`：DDP 下只由 rank 0 建立 run 目录、写 TensorBoard/checkpoint，路径广播并在写 checkpoint 后同步；验证 loss 通过跨 rank 的 sum/count all-reduce 汇总，避免将半个 validation split 误报为完整指标。
 - `MTR/tools/train_multiego.py` 与 `MTR/tools/train_utils/train_utils.py`：加入正确缩放 loss、只在每个累积组末尾更新参数/调度器、DDP 中间 micro-batch 不同步梯度的 `--grad_accum_steps` 支持。
 - YAML 静态检查：MTR 的 4 个 V2V4Real 配置及 OpenCOOD 的 CoBEVT 1x、CoBEVT 256x、SinBEVT 配置均可由 PyYAML 解析；`point_pillar_v2vnet_multiego_v2v4real.yaml` 在当前和 `de0f839` 基线中都在 `preprocess.args.voxel_size` 存在同一处过度缩进，因而都不能解析。本次只替换了其数据路径，没有修复未使用的上游 V2VNet 配置语义。
 
@@ -106,11 +108,12 @@
 - 全量融合特征约 24 GB、MTR checkpoint 约 2.5 GB，均为可再下载/再生成的忽略文件，不随 Git 提交。
 - 单样本 smoke 指标仅用于通路验证；完整指标才是本任务的复现结果，但它们是否与论文数值完全一致仍需在相同数据版本、评测协议和权重来源下另行逐项比对。
 - 两阶段训练的完整时长取决于 train record 数、batch size 和双卡吞吐；在完成单 batch 反向和 DDP 采样审计前，不应估计为已完成或直接引用官方 checkpoint 代替自训结果。
-- CoBEVT 训练配置含随机数据增强；本次将固定训练进程和 MTR 的随机种子，但原始 `opencood/tools/train.py` 没有种子参数，因此感知阶段的逐步权重不保证与作者训练的 bitwise 一致，只以相同代码、数据、配置和训练轮数复现。
+- CoBEVT 训练配置含随机数据增强；本次已通过 `--seed 42` 固定训练进程与 MTR 的随机状态，但 CUDA 算子及 DataLoader worker 仍未被强制为 deterministic，因此不承诺与作者训练或重复运行的 bitwise 完全一致，只以相同代码、数据、配置、seed 和训练轮数复现。
+- CoBEVT 全精度 DDP 运行在混合 CAV batch 上的 NVIDIA 显存最高观测为约 22.9 GB（RTX 3090 总计 24 GB），尚未发生 OOM；最终运行需持续监控。若出现真实 OOM，将使用同一源码提供的 `--half` AMP 分支重跑并明确标注，不能通过减少数据、CAV 或训练轮数掩盖问题。
 
 ## 下一步
 
-1. 用已通过的 DDP 配置启动 CoBEVT c256 80 epoch 随机初始化训练，记录实际 checkpoint、训练/验证 loss 和显存。
+1. 用已通过的 DDP 配置（seed=42、rank 0 单写、验证 all-reduce）启动 CoBEVT c256 80 epoch 随机初始化训练，记录实际 checkpoint、训练/验证 loss 和显存。
 2. 用自训感知 checkpoint 重新生成隔离的 train/test 特征与跟踪结果，并重建 MTR cache。
 3. 启动 no-aggregation MTR，再以该 checkpoint 初始化 CMP 聚合器；最终仅用自训 CMP checkpoint 单卡评测。
 
@@ -118,9 +121,9 @@
 
 - 当前分支：`codex/cmp-v2v4real-repro`。
 - 修改前基线：`main` 的 `de0f839`。
-- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
+- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）、`d7ee7da`（CoBEVT seed）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
 - 恢复方式（提交后）：`git revert <任务提交>`；或切回 `main` 查看原始版本。不得删除生成数据，除非用户另行授权。
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；已补齐 CoBEVT 的全局随机种子入口，下一步为以 seed 42 重新启动完整自训感知阶段。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；已补齐 CoBEVT 的全局 seed、DDP run/checkpoint 单写和验证聚合，下一步为以 seed 42 最终启动完整自训感知阶段。
