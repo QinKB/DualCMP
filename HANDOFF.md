@@ -4,7 +4,7 @@
 
 - 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
 - 验收标准：依赖和原生算子可导入；从随机初始化完成 CoBEVT 感知训练；由该自训感知模型生成 train/test 的检测、跟踪、轨迹和融合特征；随后完成 no-aggregation MTR 与 CMP 聚合模型训练，最终对自训 CMP checkpoint 做完整单卡评测。
-- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过，80 epoch 完整感知训练尚未启动。
+- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。第一次完整训练在第 3 个混合 CAV batch 暴露并定位了 collate 缺陷，修复后的同顺序 DDP smoke 已通过，待重新启动 80 epoch 训练。
 
 ## 背景与动机
 
@@ -71,6 +71,8 @@
 - 训练信号验证：no-aggregation 模型的真实 batch 为 2 个 CAV、每 CAV `(1,256,48,128)` 融合特征，`obj_trajs=(2,1,11,22)`；loss=63.3177 且有限，456 个参数梯度张量均有限，完成 AdamW step。4 个真实 micro-batch 的累积 smoke 完成 1 次更新，参数绝对变化和为 0.53487045。
 - CoBEVT 从随机初始化的真实训练 smoke（batch=4）已通过：`record_len=(4,)=[1,1,1,1]`、voxel 特征 `(23676,32,4)`，输出 `psm=(4,2,48,128)`、`rm=(4,14,48,128)`、融合特征 `(4,256,48,128)`；loss=1314.1504 有限，159 个梯度张量均有限，Adam step 后参数绝对变化和为 230.2341，峰值显存 6036.7 MB。
 - CoBEVT 双卡 DDP 真实 batch smoke 已以退出码 0 完成：每 rank batch=4、全局 batch=8，rank 0/1 loss 分别为 1819.8065/1566.5241，159 个梯度张量均有限，全局峰值显存为 6749.5 MB。PyTorch 仅报告一个卷积梯度 bucket stride 的性能警告，不影响数值或更新正确性。
+- 首次 CoBEVT 80 epoch 训练在 epoch 0 第 3 个混合 CAV batch 以退出码 1 终止，未生成 epoch checkpoint。根因是 `collate_batch_train` 把只供 batch=1 tracking 推理使用、长度随 in-range CAV 数变化的 `ego_transformation_matrix` 列表做 `np.array`/stack；实际混合 batch 为 `[2,2,1,2]`，因而触发不等长数组错误。模型 forward 与检测 loss 对该字段均无读取路径。
+- 修复后，`collate_batch_train` 仅在 `len(batch)==1` 时保留与原先相同的 tensor `transformation_matrix_list`，多样本训练 batch 不再携带该未消费字段。用原训练的 `DistributedSampler.set_epoch(0)` 顺序在双卡真实模型上执行 3 次更新：rank 1 的第 3 个 batch 正是 `[2,2,1,2]`，两 rank 均完成前向、loss、反向和 step；159 个梯度张量均有限，峰值显存为 8722.7 MB。单样本 test collate 保持矩阵形状 `(1,1,4,4)`。
 
 ## 修改内容
 
@@ -82,6 +84,7 @@
 - `opencood/tools/multi_ego_inference_v2v4real.py`：增加 `--refresh_perception_features` / `--max_frames`；修正融合特征实际 `.pkl.npy` 名称检查、缓存命中时丢失检测元数据、`None` 输出路径和跟踪缓存误读检测缓存的问题；默认行为仍可使用已有缓存。
 - `MTR/tools/train_multiego.py`：使 `--not_eval_with_train` 同时跳过训练结束后的最终评测，避免 DDP 下未聚合的自定义指标被误当作完整结果。
 - `MTR/mtr/datasets/v2v4real_multiego_dataset.py`：拒绝不受支持的 batch_size>1，避免静默丢弃场景。
+- `opencood/data_utils/v2v4real/datasets/intermediate_fusion_dataset_multi_ego.py`：训练时不堆叠不等长且不参与模型/loss 的 tracking 变换矩阵；仍为 batch-size-one 推理保留原有 tensor 接口。
 - `MTR/tools/train_multiego.py` 与 `MTR/tools/train_utils/train_utils.py`：加入正确缩放 loss、只在每个累积组末尾更新参数/调度器、DDP 中间 micro-batch 不同步梯度的 `--grad_accum_steps` 支持。
 - YAML 静态检查：MTR 的 4 个 V2V4Real 配置及 OpenCOOD 的 CoBEVT 1x、CoBEVT 256x、SinBEVT 配置均可由 PyYAML 解析；`point_pillar_v2vnet_multiego_v2v4real.yaml` 在当前和 `de0f839` 基线中都在 `preprocess.args.voxel_size` 存在同一处过度缩进，因而都不能解析。本次只替换了其数据路径，没有修复未使用的上游 V2VNet 配置语义。
 
@@ -118,4 +121,4 @@
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；已完成 CoBEVT 双卡训练 smoke，下一步为完整自训感知阶段。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；已修复 CoBEVT 训练的混合 CAV collate 根因，下一步为重新启动完整自训感知阶段。

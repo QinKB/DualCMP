@@ -998,8 +998,6 @@ class IntermediateFusionDatasetMultiEgo(Dataset):
         # (B, 6)
         lidar_pose = torch.from_numpy(np.array(lidar_pose_list))
         
-        transformation_matrix = torch.from_numpy(np.array(transformation_matrix_list))
-    
         # object id is only used during inference, where batch size is 1.
         # so here we only get the first element.
         output_dict['ego'].update({'object_bbx_center': object_bbx_center,
@@ -1017,8 +1015,18 @@ class IntermediateFusionDatasetMultiEgo(Dataset):
                                    'timestamp_key_list': timestamp_key_list,
                                    'timestamp_idx_list': timestamp_idx_list,
                                    'ego_cav_id_list': ego_cav_id_list,
-                                   'transformation_matrix_list': transformation_matrix # Comment for training, Uncomment for testing
                                 })
+
+        # This matrix list is used only by the batch-size-one tracking
+        # inference path.  A train batch may contain scenes with different
+        # numbers of in-range CAVs, so stacking it would fail even though the
+        # detector forward/loss never consume it.
+        if len(batch) == 1:
+            transformation_matrix = torch.from_numpy(
+                np.array(transformation_matrix_list)
+            )
+            output_dict['ego']['transformation_matrix_list'] = \
+                transformation_matrix
 
         if self.visualize:
             origin_lidar = \
