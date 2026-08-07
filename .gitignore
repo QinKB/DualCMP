@@ -12,3 +12,7 @@ preprocessed_data/v2v4real/fused_*
 preprocessed_data/v2v4real/detection*
 preprocessed_data/v2v4real/new_ab3dmot*
 results/*
+
+# Interpreter-specific native-extension build outputs.
+*.cpython-*.so
+MTR/mtr/version.py

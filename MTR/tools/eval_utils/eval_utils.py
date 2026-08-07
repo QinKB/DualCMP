@@ -16,7 +16,6 @@ from pympler import asizeof
 
 from mtr.datasets.opv2v_multiego_dataset import OPV2VMultiEgoDataset
 from mtr.datasets.v2v4real_multiego_dataset import V2V4RealMultiEgoDataset
-from mtr.datasets.waymo.waymo_eval import waymo_evaluation, transform_preds_to_waymo_format
 
 def fit_polynomial_and_evaluate_errors(trajectory, order=2, threshold=0.1):
     # Separate x and y coordinates

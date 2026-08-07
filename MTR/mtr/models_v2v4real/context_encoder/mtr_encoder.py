@@ -1,8 +1,6 @@
-from this import d
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import AutoImageProcessor, SwinModel
 
 from mtr.models_v2v4real.utils.transformer import transformer_encoder_layer, position_encoding_utils
 from mtr.models_v2v4real.utils import polyline_encoder

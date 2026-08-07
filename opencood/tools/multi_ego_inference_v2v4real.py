@@ -37,7 +37,7 @@ import resource
 rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (50000, rlimit[1]))
 
-dataset_path = '/data1/Datasets/V2V4Real/'
+dataset_path = '/home/qkb/Project/data/V2V4Real/'
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='multi ego inference configuration')
@@ -50,6 +50,10 @@ def parse_arguments():
                         help='Name of the perception model to use (required)')
     parser.add_argument('--no_coop', action='store_true', 
                         help='Flag to use no cooperative setting(default: False)')
+    parser.add_argument('--refresh_perception_features', action='store_true',
+                        help='Run perception even when its cache exists, without overwriting cached detections.')
+    parser.add_argument('--max_frames', type=int, default=None,
+                        help='Limit perception to this many dataloader samples for a smoke test.')
 
     args = parser.parse_args()
     return args
@@ -109,7 +113,8 @@ def PerformDetectionWithPretrained(path_to_tracking_label_save=None,
                                     use_train_set=False,
                                     save_perception_features=False,
                                     no_coop=False,
-                                    show_visualization=False):
+                                    show_visualization=False,
+                                    max_frames=None):
     """
     Perform detection with pretrained perception model.
     Note that you need to specify the path to data in the config.yaml file in the pretrained model folder.
@@ -158,7 +163,9 @@ def PerformDetectionWithPretrained(path_to_tracking_label_save=None,
 
     # Inference.
     print('Running Inference')
-    for batch_data in tqdm(data_loader):
+    for frame_idx, batch_data in enumerate(tqdm(data_loader)):
+        if max_frames is not None and frame_idx >= max_frames:
+            break
         scenario_path = batch_data['ego']['scenario_list'][0]  # A path to scenario folder.
         scenario_name = scenario_path.split('/')[-1]
         timestamp_key = batch_data['ego']['timestamp_key_list'][0]
@@ -177,8 +184,10 @@ def PerformDetectionWithPretrained(path_to_tracking_label_save=None,
             continue
 
         # print(f"Processing {scenario_name} when ego is {ego_cav_id} at time {timestamp_key}(Index: {timestamp_idx}). ")
-        curr_path = os.path.join(path_to_detection_output, scenario_name)  # Put all vehicle's results in one folder.
-        os.makedirs(curr_path, exist_ok=True)
+        curr_path = None
+        if path_to_detection_output is not None:
+            curr_path = os.path.join(path_to_detection_output, scenario_name)  # Put all vehicle's results in one folder.
+            os.makedirs(curr_path, exist_ok=True)
 
         result_stat = {0.3: {'tp': [], 'fp': [], 'gt': 0, 'score': [], 'matched_indices': []},
                        0.5: {'tp': [], 'fp': [], 'gt': 0, 'score': [], 'matched_indices': []},
@@ -266,16 +275,18 @@ def PerformDetectionWithPretrained(path_to_tracking_label_save=None,
             }
             # Save immediate perception features to disk.
             if save_perception_features:
-                if os.path.exists(os.path.join(path_to_detection_fused_features, f"fused_feature_{scenario_name}_{ego_cav_id}_{timestamp_idx}.pkl")):
-                    continue
                 os.makedirs(path_to_detection_fused_features, exist_ok=True)
-                if no_coop:
-                    fused_feature_np = output_dict['ego']['spatial_features_2d'].cpu().detach().numpy()
-                else:
-                    fused_feature_np = output_dict['ego']['fused_feature'].cpu().detach().numpy()
-                np.save(os.path.join(path_to_detection_fused_features, f"fused_feature_{scenario_name}_{ego_cav_id}_{timestamp_idx}.pkl"),
-                        fused_feature_np)
-                all_detections_for_this_frame['path_to_fused_feature'] = os.path.join(path_to_detection_fused_features, f"fused_feature_{scenario_name}_{ego_cav_id}_{timestamp_idx}.pkl")
+                fused_feature_path = os.path.join(
+                    path_to_detection_fused_features,
+                    f"fused_feature_{scenario_name}_{ego_cav_id}_{timestamp_idx}.pkl.npy",
+                )
+                if not os.path.exists(fused_feature_path):
+                    if no_coop:
+                        fused_feature_np = output_dict['ego']['spatial_features_2d'].cpu().detach().numpy()
+                    else:
+                        fused_feature_np = output_dict['ego']['fused_feature'].cpu().detach().numpy()
+                    np.save(fused_feature_path[:-4], fused_feature_np)
+                all_detections_for_this_frame['path_to_fused_feature'] = fused_feature_path
 
             # Save to memory.
             if scenario_name not in detection_result_for_tracking:
@@ -628,13 +639,22 @@ if __name__ == '__main__':
 
     ## Stage 1: Detection.
     path_to_detection_cache = os.path.join(project_dir, 'preprocessed_data' , dataset) + '/' + args.perception_model_name + f'_detection_result_for_tracking_{"train" if args.use_train_set else "test"}.pkl'
-    if not os.path.exists(path_to_detection_cache):
-        print("Cached detection result not found. Performing detection with pretrained perception model.")
-        detection_result_for_tracking = PerformDetectionWithPretrained(path_to_tracking_label_save=path_to_tracking_label_save,path_to_perception_pretrained=path_to_perception_pretrained, path_to_detection_output=path_to_detection_output, path_to_detection_fused_features=path_to_detection_fused_features, path_to_mtr_traj_gt=path_to_mtr_traj_gt, dataset_name=dataset, use_train_set=args.use_train_set, save_perception_features=True, no_coop=args.no_coop)
-        os.makedirs(os.path.dirname(path_to_detection_cache), exist_ok=True)
-        with open(path_to_detection_cache, 'wb') as file:
-            pickle.dump(detection_result_for_tracking, file)
-        print("Saved detection result to disk at " + path_to_detection_cache)
+    detection_cache_exists = os.path.exists(path_to_detection_cache)
+    if not detection_cache_exists or args.refresh_perception_features:
+        if detection_cache_exists:
+            print("Refreshing perception features without overwriting the cached detection result.")
+        else:
+            print("Cached detection result not found. Performing detection with pretrained perception model.")
+        detection_result_for_tracking = PerformDetectionWithPretrained(path_to_tracking_label_save=path_to_tracking_label_save,path_to_perception_pretrained=path_to_perception_pretrained, path_to_detection_output=None if args.refresh_perception_features else path_to_detection_output, path_to_detection_fused_features=path_to_detection_fused_features, path_to_mtr_traj_gt=path_to_mtr_traj_gt, dataset_name=dataset, use_train_set=args.use_train_set, save_perception_features=True, no_coop=args.no_coop, max_frames=args.max_frames)
+        if not detection_cache_exists and args.max_frames is None:
+            os.makedirs(os.path.dirname(path_to_detection_cache), exist_ok=True)
+            with open(path_to_detection_cache, 'wb') as file:
+                pickle.dump(detection_result_for_tracking, file)
+            print("Saved detection result to disk at " + path_to_detection_cache)
+        elif args.max_frames is not None:
+            print("Perception was limited for a smoke test; detection cache was not written.")
+        elif args.refresh_perception_features:
+            print("Perception features refreshed; existing detection cache was left unchanged.")
     else:
         print("Cached detection result found. Loading from disk. To recompute, simply delete " + path_to_detection_cache)
         with open(path_to_detection_cache, 'rb') as file:
@@ -652,5 +672,5 @@ if __name__ == '__main__':
     else:
         print(
             "Cached tracking result found. Loading from disk. To recompute, simply delete " + path_to_tracking_cache)
-        with open(path_to_detection_cache, 'rb') as file:
+        with open(path_to_tracking_cache, 'rb') as file:
             tracking_result_for_prediction = pickle.load(file)

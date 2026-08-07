@@ -1,6 +1,6 @@
 name: point_pillar_cobevt_v2v4real
-root_dir: '/data1/Datasets/V2V4Real/train'
-validate_dir: '/data1/Datasets/V2V4Real/test'
+root_dir: '/home/qkb/Project/data/V2V4Real/train'
+validate_dir: '/home/qkb/Project/data/V2V4Real/test'
 
 wild_setting:
   async: sim

@@ -2,13 +2,13 @@ DATA_CONFIG:
     DATASET: &dataset_type V2V4RealMultiEgoDataset
     OBJECT_TYPE: &object_type ['TYPE_VEHICLE']
     max_cav: &max_cav 5
-    train_dir: '/data1/Datasets/V2V4Real/train'
-    validate_dir: '/data1/Datasets/V2V4Real/test'
+    train_dir: '/home/qkb/Project/data/V2V4Real/train'
+    validate_dir: '/home/qkb/Project/data/V2V4Real/test'
     preprocessed_gt_traj_dir: 'preprocessed_data/v2v4real/gt_multiego_speedless'
     perception_model_name: &perception_model_name 'point_pillar_cobevt_multiego_256x'
     preprocessed_pred_traj_dir: 'preprocessed_data/v2v4real/tracking_trajs_point_pillar_cobevt_multiego_256x'
     cobevt_fused_features_dir: 'preprocessed_data/v2v4real/fused_features_point_pillar_cobevt_multiego_256x'
-    DATASET_CACHE_DIR: 'preprocessed_data/v2v4real'
+    DATASET_CACHE_DIR: '/home/qkb/Project/data/V2V4Real/derived/CMP/cache'
     PRETRAINED_MOTION_TRANSFORMER: ''
 
     PAST_FRAMES: 10
