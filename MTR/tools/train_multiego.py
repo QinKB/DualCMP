@@ -53,6 +53,8 @@ def parse_config():
     parser.add_argument('--not_eval_with_train', action='store_true', default=False, help='')
     parser.add_argument('--logger_iter_interval', type=int, default=50, help='')
     parser.add_argument('--ckpt_save_time_interval', type=int, default=300, help='in terms of seconds')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='number of per-rank micro-batches to accumulate before an optimizer step')
 
     parser.add_argument('--add_worker_init_fn', action='store_true', default=False, help='')
     parser.add_argument('--freeze_mtr', action='store_true', default=False, help='')
@@ -129,6 +131,7 @@ def build_scheduler(optimizer, dataloader, opt_cfg, total_epochs, total_iters_ea
 
 def main():
     args, cfg = parse_config()
+    assert args.grad_accum_steps >= 1
     if args.launcher == 'none':
         dist_train = False
         total_gpus = 1
@@ -242,7 +245,7 @@ def main():
 
     scheduler = build_scheduler(
         optimizer, train_loader, cfg.OPTIMIZATION, total_epochs=args.epochs,
-        total_iters_each_epoch=len(train_loader), last_epoch=last_epoch
+        total_iters_each_epoch=math.ceil(len(train_loader) / args.grad_accum_steps), last_epoch=last_epoch
     )
 
     model.train()  # before wrap to DistributedDataParallel to support to fix some parameters
@@ -285,7 +288,8 @@ def main():
         eval_output_dir=eval_output_dir,
         test_loader=test_loader if not args.not_eval_with_train else None,
         cfg=cfg, dist_train=dist_train, logger_iter_interval=args.logger_iter_interval,
-        ckpt_save_time_interval=args.ckpt_save_time_interval
+        ckpt_save_time_interval=args.ckpt_save_time_interval,
+        grad_accum_steps=args.grad_accum_steps
     )
 
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'

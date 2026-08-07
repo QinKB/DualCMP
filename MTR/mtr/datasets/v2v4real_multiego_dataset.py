@@ -803,7 +803,14 @@ class V2V4RealMultiEgoDataset(DatasetTemplate):
             center_gt_trajs_mask (num_center_objects, num_future_timestamps):
             center_gt_final_valid_idx (num_center_objects): the final valid timestamp in num_future_timestamps
         """
-        cavs_data_for_mtr = batch_list[0]  # there is only one
+        if len(batch_list) != 1:
+            raise ValueError(
+                'V2V4RealMultiEgoDataset only supports DataLoader batch_size=1: '
+                'each item contains all CAVs for one scene. Use distributed training and '
+                'gradient accumulation for a larger effective batch size.'
+            )
+
+        cavs_data_for_mtr = batch_list[0]
 
         num_cavs = len(cavs_data_for_mtr)
 

@@ -5,6 +5,8 @@
 
 import glob
 import os
+import contextlib
+import math
 
 import torch
 import tqdm
@@ -13,25 +15,30 @@ from torch.nn.utils import clip_grad_norm_
 
 def train_one_epoch(model, optimizer, train_loader, accumulated_iter, optim_cfg,
                     rank, tbar, total_it_each_epoch, dataloader_iter, tb_log=None, leave_pbar=False, scheduler=None, show_grad_curve=False,
-                    logger=None, logger_iter_interval=50, cur_epoch=None, total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300):
+                    logger=None, logger_iter_interval=50, cur_epoch=None, total_epochs=None, ckpt_save_dir=None, ckpt_save_time_interval=300,
+                    grad_accum_steps=1):
+    assert grad_accum_steps >= 1
     if total_it_each_epoch == len(train_loader):
         dataloader_iter = iter(train_loader)
 
     optimizer, optimizer_2 = optimizer if isinstance(optimizer, list) else (optimizer, None)
 
+    total_micro_iters = total_it_each_epoch
+    total_update_iters = math.ceil(total_micro_iters / grad_accum_steps)
     if rank == 0:
-        pbar = tqdm.tqdm(total=total_it_each_epoch, leave=leave_pbar, desc='train', dynamic_ncols=True)
+        pbar = tqdm.tqdm(total=total_update_iters, leave=leave_pbar, desc='train', dynamic_ncols=True)
 
     ckpt_save_cnt = 1
-    start_it = accumulated_iter % total_it_each_epoch
-
-    for cur_it in range(start_it, total_it_each_epoch):
+    start_update_it = accumulated_iter % total_update_iters
+    for _ in range(min(start_update_it * grad_accum_steps, total_micro_iters)):
         try:
-            batch = next(dataloader_iter)
+            next(dataloader_iter)
         except StopIteration:
             dataloader_iter = iter(train_loader)
-            batch = next(dataloader_iter)
-            print('new iters')
+            next(dataloader_iter)
+
+    for cur_update_it in range(start_update_it, total_update_iters):
+        micro_iters_this_update = min(grad_accum_steps, total_micro_iters - cur_update_it * grad_accum_steps)
 
         if scheduler is not None:
             try:
@@ -49,34 +56,44 @@ def train_one_epoch(model, optimizer, train_loader, accumulated_iter, optim_cfg,
         if optimizer_2 is not None:
             optimizer_2.zero_grad()
 
-        loss, tb_dict, disp_dict = model(batch)
+        update_loss = 0.0
+        for micro_it in range(micro_iters_this_update):
+            try:
+                batch = next(dataloader_iter)
+            except StopIteration:
+                dataloader_iter = iter(train_loader)
+                batch = next(dataloader_iter)
+                print('new iters')
 
-        loss.backward()
+            sync_context = model.no_sync() if hasattr(model, 'no_sync') and micro_it + 1 < micro_iters_this_update else contextlib.nullcontext()
+            with sync_context:
+                loss, tb_dict, disp_dict = model(batch)
+                (loss / micro_iters_this_update).backward()
+            update_loss += loss.item()
 
         total_norm = clip_grad_norm_(model.parameters(), optim_cfg.GRAD_NORM_CLIP)
-
         optimizer.step()
 
         if optimizer_2 is not None:
             optimizer_2.step()
 
         accumulated_iter += 1
-        disp_dict.update({'loss': loss.item(), 'lr': cur_lr})
+        disp_dict.update({'loss': update_loss / micro_iters_this_update, 'lr': cur_lr})
 
         # log to console and tensorboard
         if rank == 0:
-            if accumulated_iter % logger_iter_interval == 0 or cur_it == start_it or cur_it + 1 == total_it_each_epoch:
+            if accumulated_iter % logger_iter_interval == 0 or cur_update_it == start_update_it or cur_update_it + 1 == total_update_iters:
                 trained_time_past_all = tbar.format_dict['elapsed']
-                second_each_iter = pbar.format_dict['elapsed'] / max(cur_it - start_it + 1, 1.0)
+                second_each_iter = pbar.format_dict['elapsed'] / max(cur_update_it - start_update_it + 1, 1.0)
 
                 trained_time_each_epoch = pbar.format_dict['elapsed']
-                remaining_second_each_epoch = second_each_iter * (total_it_each_epoch - cur_it)
-                remaining_second_all = second_each_iter * ((total_epochs - cur_epoch) * total_it_each_epoch - cur_it)
+                remaining_second_each_epoch = second_each_iter * (total_update_iters - cur_update_it - 1)
+                remaining_second_all = second_each_iter * ((total_epochs - cur_epoch) * total_update_iters - cur_update_it - 1)
 
                 disp_str = ', '.join([f'{key}={val:.3f}' for key, val in disp_dict.items() if key != 'lr'])
                 disp_str += f', lr={disp_dict["lr"]}'
                 batch_size = batch.get('batch_size', None)
-                logger.info(f'epoch: {cur_epoch}/{total_epochs}, acc_iter={accumulated_iter}, cur_iter={cur_it}/{total_it_each_epoch}, batch_size={batch_size}, iter_cost={second_each_iter:.2f}s, '
+                logger.info(f'epoch: {cur_epoch}/{total_epochs}, acc_iter={accumulated_iter}, cur_iter={cur_update_it}/{total_update_iters}, batch_size={batch_size}, iter_cost={second_each_iter:.2f}s, '
                             f'time_cost(epoch): {tbar.format_interval(trained_time_each_epoch)}/{tbar.format_interval(remaining_second_each_epoch)}, '
                             f'time_cost(all): {tbar.format_interval(trained_time_past_all)}/{tbar.format_interval(remaining_second_all)}, '
                             f'{disp_str}')
@@ -88,8 +105,9 @@ def train_one_epoch(model, optimizer, train_loader, accumulated_iter, optim_cfg,
                 tb_log.add_scalar('train/total_norm', total_norm, accumulated_iter)
                 if show_grad_curve:
                     for key, val in model.named_parameters():
-                        key = key.replace('.', '/')
-                        tb_log.add_scalar('train_grad/' + key, val.grad.abs().max().item(), accumulated_iter)
+                        if val.grad is not None:
+                            key = key.replace('.', '/')
+                            tb_log.add_scalar('train_grad/' + key, val.grad.abs().max().item(), accumulated_iter)
 
             time_past_this_epoch = pbar.format_dict['elapsed']
             if time_past_this_epoch // ckpt_save_time_interval >= ckpt_save_cnt:
@@ -123,7 +141,7 @@ def train_model(model, optimizer, train_loader, optim_cfg,
                 start_epoch, total_epochs, start_iter, rank, ckpt_save_dir, train_sampler=None,
                 ckpt_save_interval=1, max_ckpt_save_num=50, merge_all_iters_to_one_epoch=False, tb_log=None,
                 scheduler=None, test_loader=None, logger=None, eval_output_dir=None, cfg=None, dist_train=False,
-                logger_iter_interval=50, ckpt_save_time_interval=300):
+                logger_iter_interval=50, ckpt_save_time_interval=300, grad_accum_steps=1):
     accumulated_iter = start_iter
     with tqdm.trange(start_epoch, total_epochs, desc='epochs', dynamic_ncols=True, leave=(rank == 0)) as tbar:
         total_it_each_epoch = len(train_loader)
@@ -151,7 +169,8 @@ def train_model(model, optimizer, train_loader, optim_cfg,
                 dataloader_iter=dataloader_iter,
                 scheduler=scheduler, cur_epoch=cur_epoch, total_epochs=total_epochs,
                 logger=logger, logger_iter_interval=logger_iter_interval,
-                ckpt_save_dir=ckpt_save_dir, ckpt_save_time_interval=ckpt_save_time_interval
+                ckpt_save_dir=ckpt_save_dir, ckpt_save_time_interval=ckpt_save_time_interval,
+                grad_accum_steps=grad_accum_steps
             )
 
             # save trained model
