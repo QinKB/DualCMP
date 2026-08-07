@@ -2,9 +2,9 @@
 
 ## 当前任务
 
-- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 复现并跑通 CMP 的 V2V4Real 测试流程。
-- 验收标准：依赖和原生算子可导入；官方感知与轨迹权重可加载；完整测试集的融合特征可生成；MTR 评测命令实际结束并留下真实指标。
-- 当前状态（2026-08-07）：所有验收项已完成；完整 MTR 评测以退出码 0 结束并产生真实指标。
+- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
+- 验收标准：依赖和原生算子可导入；train/test 的感知、跟踪、轨迹和融合特征数据可用；先完成 no-aggregation MTR 训练，再用其初始化 CMP 聚合模型训练；最终对自训 checkpoint 做完整评测。
+- 当前状态（2026-08-07）：官方权重的完整测试已完成；训练数据准备和真实 train 样本 smoke 已开始，完整训练尚未启动。
 
 ## 背景与动机
 
@@ -58,6 +58,13 @@
 - 完整运行的退出码为 0。GPU 推理进度为 2,858 / 2,858，耗时约 4 分 20 秒；日志的指标聚合包含 29,500 个预测目标、Filtered=0：minADE 1/3/5s = 1.1375 / 2.6684 / 3.9257，minFDE 1/3/5s = 2.0376 / 4.8467 / 7.0533，MR@3.6/3.0/2.0/1.8 = 0.3299 / 0.3393 / 0.3628 / 0.3673。
 - 完整日志：`/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_full_20260807/eval/log_eval_20260807-120255.txt`。
 
+### 训练复现审计（进行中）
+
+- 实际训练入口为 `MTR/tools/train_multiego.py`：训练循环执行 `loss.backward()` 和 `optimizer.step()`，并保存带 optimizer state 的 checkpoint。
+- 配置表明作者采用两阶段初始化：`v2v4real_multiego_cobevt_c256_no_agg.yaml` 的 `PRETRAINED_MOTION_TRANSFORMER` 为空，应从随机初始化训练；聚合版 `v2v4real_multiego_cobevt_c256.yaml` 会加载 no-aggregation MTR，并对 MTR 使用 1/100 学习率、对 aggregation 模块使用完整学习率。为“从训练开始”复现，第二阶段将指向本机第一阶段的自训 checkpoint，而不是官方 no-aggregation 权重。
+- 审计时发现 train 缺少 CoBEVT 融合特征和 AB3DMOT 跟踪轨迹；GT train 数据已存在（64 个 scenario-CAV pickle）。训练感知 loader 有 32 个场景、14,210 个样本。
+- 已完成 11 帧真实 train 感知 smoke：官方 epoch 75 CoBEVT checkpoint 可加载并前向。为防止 smoke 污染后续训练，本任务修正了 `--max_frames`：它不再生成不完整的 tracking cache。该 smoke 未写 detection/tracking cache，留下的少量 train 融合特征可由完整预处理安全复用。
+
 ## 修改内容
 
 - `.gitignore`：忽略本机解释器生成的扩展 `.so` 和 MTR 版本文件，避免将环境构建产物提交。
@@ -70,7 +77,8 @@
 
 ## 未完成
 
-- 本次 V2V4Real 复现目标没有未完成项。
+- train 集完整 CoBEVT 融合特征、检测缓存和 AB3DMOT 跟踪轨迹尚未生成。
+- no-aggregation 和 CMP 聚合模型的自训 checkpoint 尚未生成，因而尚未对自训模型进行完整测试。
 - 未对 Waymo 数据集执行测试；它不属于本次 V2V4Real 任务，并且环境没有安装 Waymo/TensorFlow 栈。
 
 ## 已知问题与风险
@@ -79,12 +87,13 @@
 - `opencood/hypes_yaml/point_pillar_v2vnet_multiego_v2v4real.yaml` 是基线已有的无效 YAML，未用于本次 CoBEVT c256 复现；如需运行 V2VNet 变体，应先单独修复并验证其 `voxel_size` 缩进。
 - 全量融合特征约 24 GB、MTR checkpoint 约 2.5 GB，均为可再下载/再生成的忽略文件，不随 Git 提交。
 - 单样本 smoke 指标仅用于通路验证；完整指标才是本任务的复现结果，但它们是否与论文数值完全一致仍需在相同数据版本、评测协议和权重来源下另行逐项比对。
+- 两阶段训练的完整时长取决于 train record 数、batch size 和双卡吞吐；在完成单 batch 反向和 DDP 采样审计前，不应估计为已完成或直接引用官方 checkpoint 代替自训结果。
 
 ## 下一步
 
-1. 使用本文件中的完整命令可直接复查已生成的 cache 与完整评测日志；如删除融合特征，需要先重新执行感知阶段。
-2. 如需与论文表格做数值对齐，再确认论文所用数据版本和评测协议，避免把不同协议的数值直接比较。
-3. 如需运行 V2VNet 变体，先单独修复并验证其基线 YAML 缩进问题。
+1. 完成 train 集感知、检测和跟踪预处理，并核验文件数、形状、mask 与 train cache 记录数。
+2. 以真实 batch 完成 no-aggregation MTR 的前向、损失、反向、梯度和 checkpoint smoke。
+3. 核验双卡 DDP 的 sampler、batch size、checkpoint 与指标聚合后，启动两阶段完整训练；最终仅使用自训 checkpoint 评测。
 
 ## Git 状态
 

@@ -660,6 +660,10 @@ if __name__ == '__main__':
         with open(path_to_detection_cache, 'rb') as file:
             detection_result_for_tracking = pickle.load(file)
 
+    if args.max_frames is not None:
+        print("Perception smoke test complete; skipping tracking and tracking-cache creation.")
+        raise SystemExit(0)
+
     ## Stage 2: Tracking.
     path_to_tracking_cache = os.path.join(project_dir, 'preprocessed_data' , dataset) + '/' + args.perception_model_name + f'_tracking_result_for_prediction_{"train" if args.use_train_set else "test"}.pkl'
     if not os.path.exists(path_to_tracking_cache):
