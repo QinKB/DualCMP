@@ -4,7 +4,7 @@
 
 - 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 固定官方 CoBEVT 感知 checkpoint、只从训练阶段复现 CMP 的轨迹预测部分。
 - 验收标准：依赖和原生算子可导入；官方 CoBEVT 生成的 train/test 融合特征、检测与跟踪结果可用；从随机初始化训练 no-aggregation MTR，再以其初始化 CMP 预测聚合器；最终对自训 CMP checkpoint 做完整单卡 minADE/minFDE/MR 评测。
-- 当前状态（2026-08-07）：用户已明确切换为“只训练轨迹预测”。自训 CoBEVT DDP 进程已安全停止，保留其 epoch 1 checkpoint 和日志但不再用作最终结果。官方 CoBEVT 特征、tracking 和 MTR train/test cache 已完整，no-aggregation MTR 双卡训练待启动。
+- 当前状态（2026-08-07）：用户已明确切换为“只训练轨迹预测”。自训 CoBEVT DDP 进程已安全停止，保留其 epoch 1 checkpoint 和日志但不再用作最终结果。官方 CoBEVT 特征、tracking 和 MTR train/test cache 已完整；no-aggregation MTR 双卡 30 epoch 训练已于 14:28:29 启动，第 1 个 epoch checkpoint 已落盘并严格加载，当前正在第 2 个 epoch。
 
 ## 背景与动机
 
@@ -69,6 +69,8 @@
 - 完整 train 预处理已以退出码 0 完成：17,902 个唯一融合特征（约 105 GB），检测 cache 为 25,789,678 bytes，64 个 tracking pickle 与 64 个 GT pickle 名称完全一致；多出的 `tracking/train/log.txt` 不是轨迹数据。MTR train cache 含 3,684 个记录，分布为 1 CAV：2,586，2 CAV：1,098。
 - 发现并修正了上游 V2V4Real batching 根因：`collate_batch` 只使用 `batch_list[0]`，所以 batch_size>1 原先会静默丢弃其余场景。现在显式拒绝 batch_size>1；真实 4-item loader 已验证报出该错误。为在两张卡上保持作者 8 卡×每卡 1 场景的等效全局 batch=8，训练入口新增 `--grad_accum_steps`，每卡 1 个场景累积 4 步后更新一次。
 - 训练信号验证：no-aggregation 模型的真实 batch 为 2 个 CAV、每 CAV `(1,256,48,128)` 融合特征，`obj_trajs=(2,1,11,22)`；loss=63.3177 且有限，456 个参数梯度张量均有限，完成 AdamW step。4 个真实 micro-batch 的累积 smoke 完成 1 次更新，参数绝对变化和为 0.53487045。
+- 正式 no-aggregation MTR 训练已启动：`CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop torchrun --standalone --nproc_per_node=2 MTR/tools/train_multiego.py --cfg_file MTR/tools/cfgs/v2v4real/v2v4real_multiego_cobevt_c256_no_agg.yaml --batch_size 2 --workers 2 --launcher pytorch --fix_random_seed 42 --extra_tag trajectory_only_seed42 --not_eval_with_train --grad_accum_steps 4 --max_ckpt_save_num 3 --ckpt_save_interval 1 --logger_iter_interval 50`（另设项目内 `PYTHONPATH`）。日志确认从随机初始化开始，`PRETRAINED_MOTION_TRANSFORMER` 为空，加载 3,684 条 train cache 和 2,858 条 test cache。每 rank 有 1,842 个 micro-batch，累积 4 步后为 461 次 optimizer 更新/epoch，等效全局 batch=8。
+- 第 1/30 epoch 于 14:32:46 完成，双卡显存约 1.98/1.85 GB、稳定吞吐约 0.55 秒/更新，训练 loss 均为有限值。`MTR/output/v2v4real_multiego_cobevt_c256_no_agg/trajectory_only_seed42/ckpt/checkpoint_epoch_1.pth` 为 699,853,318 bytes；在 CPU 上加载得到 epoch=1、iter=461、880 个模型张量及 optimizer state。第 2 个 epoch 已于 14:32:47 开始。
 - CoBEVT 从随机初始化的真实训练 smoke（batch=4）已通过：`record_len=(4,)=[1,1,1,1]`、voxel 特征 `(23676,32,4)`，输出 `psm=(4,2,48,128)`、`rm=(4,14,48,128)`、融合特征 `(4,256,48,128)`；loss=1314.1504 有限，159 个梯度张量均有限，Adam step 后参数绝对变化和为 230.2341，峰值显存 6036.7 MB。
 - CoBEVT 双卡 DDP 真实 batch smoke 已以退出码 0 完成：每 rank batch=4、全局 batch=8，rank 0/1 loss 分别为 1819.8065/1566.5241，159 个梯度张量均有限，全局峰值显存为 6749.5 MB。PyTorch 仅报告一个卷积梯度 bucket stride 的性能警告，不影响数值或更新正确性。
 - 首次 CoBEVT 80 epoch 训练在 epoch 0 第 3 个混合 CAV batch 以退出码 1 终止，未生成 epoch checkpoint。根因是 `collate_batch_train` 把只供 batch=1 tracking 推理使用、长度随 in-range CAV 数变化的 `ego_transformation_matrix` 列表做 `np.array`/stack；实际混合 batch 为 `[2,2,1,2]`，因而触发不等长数组错误。模型 forward 与检测 loss 对该字段均无读取路径。
@@ -97,7 +99,7 @@
 
 ## 未完成
 
-- no-aggregation 和 CMP 聚合模型的自训 checkpoint 尚未生成，因而尚未对自训模型进行完整测试。
+- no-aggregation MTR 正在训练，尚未完成 30 epoch；CMP 聚合模型尚未启动，因而尚未对自训模型进行完整测试。
 - 未对 Waymo 数据集执行测试；它不属于本次 V2V4Real 任务，并且环境没有安装 Waymo/TensorFlow 栈。
 
 ## 已知问题与风险
@@ -113,7 +115,7 @@
 
 ## 下一步
 
-1. 使用官方 CoBEVT 特征，启动 no-aggregation MTR 的双卡 30 epoch 训练（每 rank 1 个场景、累积 4 步，等效全局 batch 8）。
+1. 继续 no-aggregation MTR 的双卡 30 epoch 训练，保留末轮 checkpoint。
 2. 用该 checkpoint 初始化 CMP 聚合器并完成双卡 30 epoch 训练。
 3. 最终仅使用自训 CMP checkpoint 做单卡完整 minADE/minFDE/MR 评测。
 
@@ -121,9 +123,9 @@
 
 - 当前分支：`codex/cmp-v2v4real-repro`。
 - 修改前基线：`main` 的 `de0f839`。
-- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）、`d7ee7da`（CoBEVT seed）、`aff428b`（DDP run/checkpoint 单写与验证聚合）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
+- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）、`d7ee7da`（CoBEVT seed）、`aff428b`（DDP run/checkpoint 单写与验证聚合）、`f86d0e1`（切换为官方 CoBEVT + 自训轨迹预测）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
 - 恢复方式（提交后）：`git revert <任务提交>`；或切回 `main` 查看原始版本。不得删除生成数据，除非用户另行授权。
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；用户已切换为官方 CoBEVT + 自训轨迹预测，下一步为启动 no-aggregation MTR。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；用户已切换为官方 CoBEVT + 自训轨迹预测，no-aggregation MTR 已完成 epoch 1 并正在 epoch 2。
