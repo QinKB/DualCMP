@@ -77,6 +77,7 @@
 - seed=42 的后续重启正常运行至第 337 step（loss 仍有限），但审计发现验证循环将 rank 0 的半个 test sampler 均值直接写为全量验证 loss，且两个 rank 会竞争创建 run-dir/config 与写同一 `net_epoch*.pth`。该运行也在 epoch 0、无 checkpoint 时有意停止。现在只有 rank 0 创建目录、写 config/TensorBoard/checkpoint，目录通过 DDP object broadcast 传给另一 rank；每个 epoch checkpoint 写完后 barrier；验证 loss 按 `sum(loss) / count` 的 float64 all-reduce 聚合。双卡最小测试实际验证了路径 broadcast 和 loss sum/count all-reduce，两个 rank 都得到路径一致和全局均值 1.5。
 - 正式 CoBEVT 运行命令：`PYTHONPATH=/home/qkb/Project/CMP CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop torchrun --standalone --nproc_per_node=2 opencood/tools/train.py --hypes_yaml opencood/hypes_yaml/point_pillar_cobevt_multiego_256x_v2v4real.yaml --dataset_name v2v4real --seed 42`。输出目录为 `opencood/logs/point_pillar_cobevt_v2v4real_2026_08_07_13_44_41`，其 `config.yaml` 已实际记录 `train_params.seed: 42`。
 - 正式 run 的 epoch 1 已完成：1,776 个每-rank train step 后仅由 rank 0 写出 `net_epoch1.pth`（739,231,489 bytes，2026-08-07 14:12:00）。跨两 rank、共 3,986 个 validation records 聚合的检测 validation loss 为 `2.0913016796`（2026-08-07 14:15:51）；不是 rank 0 半个 split 的局部均值。此后已进入第 2 个 epoch，实时 rank-0 的 regression/confidence loss 仍有限。
+- `net_epoch1.pth` 的 checkpoint load 已在 CPU 上严格验证：state dict 含 259 个键，按当前 CoBEVT c256 配置构建的模型 `strict=True` 加载后 missing/unexpected keys 均为 0。
 
 ## 修改内容
 
