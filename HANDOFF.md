@@ -3,8 +3,8 @@
 ## 当前任务
 
 - 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
-- 验收标准：依赖和原生算子可导入；train/test 的感知、跟踪、轨迹和融合特征数据可用；先完成 no-aggregation MTR 训练，再用其初始化 CMP 聚合模型训练；最终对自训 checkpoint 做完整评测。
-- 当前状态（2026-08-07）：官方权重的完整测试已完成；训练数据准备和真实 train 样本 smoke 已开始，完整训练尚未启动。
+- 验收标准：依赖和原生算子可导入；从随机初始化完成 CoBEVT 感知训练；由该自训感知模型生成 train/test 的检测、跟踪、轨迹和融合特征；随后完成 no-aggregation MTR 与 CMP 聚合模型训练，最终对自训 CMP checkpoint 做完整单卡评测。
+- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过，80 epoch 完整感知训练尚未启动。
 
 ## 背景与动机
 
@@ -69,6 +69,8 @@
 - 完整 train 预处理已以退出码 0 完成：17,902 个唯一融合特征（约 105 GB），检测 cache 为 25,789,678 bytes，64 个 tracking pickle 与 64 个 GT pickle 名称完全一致；多出的 `tracking/train/log.txt` 不是轨迹数据。MTR train cache 含 3,684 个记录，分布为 1 CAV：2,586，2 CAV：1,098。
 - 发现并修正了上游 V2V4Real batching 根因：`collate_batch` 只使用 `batch_list[0]`，所以 batch_size>1 原先会静默丢弃其余场景。现在显式拒绝 batch_size>1；真实 4-item loader 已验证报出该错误。为在两张卡上保持作者 8 卡×每卡 1 场景的等效全局 batch=8，训练入口新增 `--grad_accum_steps`，每卡 1 个场景累积 4 步后更新一次。
 - 训练信号验证：no-aggregation 模型的真实 batch 为 2 个 CAV、每 CAV `(1,256,48,128)` 融合特征，`obj_trajs=(2,1,11,22)`；loss=63.3177 且有限，456 个参数梯度张量均有限，完成 AdamW step。4 个真实 micro-batch 的累积 smoke 完成 1 次更新，参数绝对变化和为 0.53487045。
+- CoBEVT 从随机初始化的真实训练 smoke（batch=4）已通过：`record_len=(4,)=[1,1,1,1]`、voxel 特征 `(23676,32,4)`，输出 `psm=(4,2,48,128)`、`rm=(4,14,48,128)`、融合特征 `(4,256,48,128)`；loss=1314.1504 有限，159 个梯度张量均有限，Adam step 后参数绝对变化和为 230.2341，峰值显存 6036.7 MB。
+- CoBEVT 双卡 DDP 真实 batch smoke 已以退出码 0 完成：每 rank batch=4、全局 batch=8，rank 0/1 loss 分别为 1819.8065/1566.5241，159 个梯度张量均有限，全局峰值显存为 6749.5 MB。PyTorch 仅报告一个卷积梯度 bucket stride 的性能警告，不影响数值或更新正确性。
 
 ## 修改内容
 
@@ -85,7 +87,8 @@
 
 ## 未完成
 
-- train 集完整 CoBEVT 融合特征、检测缓存和 AB3DMOT 跟踪轨迹尚未生成。
+- 从随机初始化完成 CoBEVT c256 的 80 epoch 双卡训练；当前已有的感知特征来自官方 epoch 75 权重，只能用作后续 MTR 通路验证，不能作为“从训练开始”的最终结果。
+- 用自训 CoBEVT checkpoint 分别生成 train 和 test 的融合特征、检测 cache 与 AB3DMOT 跟踪轨迹，并重建隔离的 MTR cache。
 - no-aggregation 和 CMP 聚合模型的自训 checkpoint 尚未生成，因而尚未对自训模型进行完整测试。
 - 未对 Waymo 数据集执行测试；它不属于本次 V2V4Real 任务，并且环境没有安装 Waymo/TensorFlow 栈。
 
@@ -98,20 +101,21 @@
 - 全量融合特征约 24 GB、MTR checkpoint 约 2.5 GB，均为可再下载/再生成的忽略文件，不随 Git 提交。
 - 单样本 smoke 指标仅用于通路验证；完整指标才是本任务的复现结果，但它们是否与论文数值完全一致仍需在相同数据版本、评测协议和权重来源下另行逐项比对。
 - 两阶段训练的完整时长取决于 train record 数、batch size 和双卡吞吐；在完成单 batch 反向和 DDP 采样审计前，不应估计为已完成或直接引用官方 checkpoint 代替自训结果。
+- CoBEVT 训练配置含随机数据增强；本次将固定训练进程和 MTR 的随机种子，但原始 `opencood/tools/train.py` 没有种子参数，因此感知阶段的逐步权重不保证与作者训练的 bitwise 一致，只以相同代码、数据、配置和训练轮数复现。
 
 ## 下一步
 
-1. 完成 train 集感知、检测和跟踪预处理，并核验文件数、形状、mask 与 train cache 记录数。
-2. 以真实 batch 完成 no-aggregation MTR 的前向、损失、反向、梯度和 checkpoint smoke。
-3. 核验双卡 DDP 的 sampler、batch size、checkpoint 与指标聚合后，启动两阶段完整训练；最终仅使用自训 checkpoint 评测。
+1. 用已通过的 DDP 配置启动 CoBEVT c256 80 epoch 随机初始化训练，记录实际 checkpoint、训练/验证 loss 和显存。
+2. 用自训感知 checkpoint 重新生成隔离的 train/test 特征与跟踪结果，并重建 MTR cache。
+3. 启动 no-aggregation MTR，再以该 checkpoint 初始化 CMP 聚合器；最终仅用自训 CMP checkpoint 单卡评测。
 
 ## Git 状态
 
 - 当前分支：`codex/cmp-v2v4real-repro`。
 - 修改前基线：`main` 的 `de0f839`。
-- 本次源码、配置与本文件作为一个独立任务提交，提交信息为 `fix: run CMP V2V4Real reproduction locally`；下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
+- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
 - 恢复方式（提交后）：`git revert <任务提交>`；或切回 `main` 查看原始版本。不得删除生成数据，除非用户另行授权。
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；完整 MTR 评测已以退出码 0 完成。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；已完成 CoBEVT 双卡训练 smoke，下一步为完整自训感知阶段。
