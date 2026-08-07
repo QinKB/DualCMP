@@ -2,9 +2,9 @@
 
 ## 当前任务
 
-- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 固定官方 CoBEVT 感知 checkpoint、只从训练阶段复现 CMP 的轨迹预测部分。
-- 验收标准：依赖和原生算子可导入；官方 CoBEVT 生成的 train/test 融合特征、检测与跟踪结果可用；从随机初始化训练 no-aggregation MTR，再以其初始化 CMP 预测聚合器；最终对自训 CMP checkpoint 做完整单卡 minADE/minFDE/MR 评测。
-- 当前状态（2026-08-07）：用户已明确切换为“只训练轨迹预测”。自训 CoBEVT DDP 进程已安全停止，保留其 epoch 1 checkpoint 和日志但不再用作最终结果。官方 CoBEVT 特征、tracking 和 MTR train/test cache 已完整；no-aggregation MTR 双卡 30 epoch 训练已于 14:28:29 启动。截至 14:57 已完成 6 个 epoch，正在第 7 个（日志 zero-based epoch 6）；其 epoch 5 checkpoint 已完成一次独立完整 test 评测。
+- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 与固定官方 CoBEVT 感知 checkpoint，从训练开始复现 CMP 的轨迹预测部分（no-aggregation MTR）。
+- 验收标准：依赖和原生算子可导入；官方 CoBEVT 生成的 train/test 融合特征、检测与跟踪结果可用；no-aggregation MTR 从随机初始化完成 30 epoch 训练；对可用 checkpoint 做完整单卡 minADE/minFDE/MR 评测。用户已将 CMP 预测聚合器训练排除在本轮范围之外。
+- 当前状态（2026-08-07 18:51）：no-aggregation MTR 双卡 30 epoch 训练已完成；epoch 5、28、29、30 均已在同一 test cache 上完成独立单卡评测。按用户关注的 5 秒 minFDE，epoch 5 独立快照为已测试 checkpoint 中最优（7.5559）；末轮 epoch 30 为 10.3258。聚合器尚未启动，符合“只训练轨迹预测”的当前范围。
 
 ## 背景与动机
 
@@ -58,7 +58,7 @@
 - 完整运行的退出码为 0。GPU 推理进度为 2,858 / 2,858，耗时约 4 分 20 秒；日志的指标聚合包含 29,500 个预测目标、Filtered=0：minADE 1/3/5s = 1.1375 / 2.6684 / 3.9257，minFDE 1/3/5s = 2.0376 / 4.8467 / 7.0533，MR@3.6/3.0/2.0/1.8 = 0.3299 / 0.3393 / 0.3628 / 0.3673。
 - 完整日志：`/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_full_20260807/eval/log_eval_20260807-120255.txt`。
 
-### 训练复现审计（进行中）
+### 训练复现审计（已完成：轨迹预测阶段）
 
 - 实际训练入口为 `MTR/tools/train_multiego.py`：训练循环执行 `loss.backward()` 和 `optimizer.step()`，并保存带 optimizer state 的 checkpoint。
 - 配置表明作者采用两阶段初始化：`v2v4real_multiego_cobevt_c256_no_agg.yaml` 的 `PRETRAINED_MOTION_TRANSFORMER` 为空，应从随机初始化训练；聚合版 `v2v4real_multiego_cobevt_c256.yaml` 会加载 no-aggregation MTR，并对 MTR 使用 1/100 学习率、对 aggregation 模块使用完整学习率。第二阶段将指向本机第一阶段的自训 checkpoint，而不是官方 no-aggregation 权重。
@@ -73,6 +73,18 @@
 - 第 1/30 epoch 于 14:32:46 完成，双卡显存约 1.98/1.85 GB、稳定吞吐约 0.55 秒/更新，训练 loss 均为有限值。`MTR/output/v2v4real_multiego_cobevt_c256_no_agg/trajectory_only_seed42/ckpt/checkpoint_epoch_1.pth` 为 699,853,318 bytes；在 CPU 上加载得到 epoch=1、iter=461、880 个模型张量及 optimizer state。第 2 个 epoch 已于 14:32:47 开始。
 - 训练以 `--max_ckpt_save_num 3` 仅保留最近 3 个 checkpoint；因此 checkpoint epoch 1 在 epoch 4 保存后被自动清理。用户在其被清理后请求 epoch 1 FDE，无法再诚实评测该具体权重。随后尝试 epoch 2 测试时，epoch 5 已于 14:49:37 保存并清理 epoch 2；测试于 14:49:47 启动，实际报 `FileNotFoundError`，没有进入推理或产生指标。
 - 为避免与训练清理并发，已将 epoch 5（epoch=5、iter=2305）checkpoint 复制为独立快照后单卡完整评测，配置为 `v2v4real_multiego_cobevt_c256_no_agg.yaml`，checkpoint 880 个键严格加载、missing/unexpected 均为 0。2026-08-07 14:50:49--14:57:36 对 2,858 条 test record、29,500 个预测目标完成评测（Filtered=0）：minADE 1/3/5s = 1.3007 / 3.0554 / 4.4001；minFDE 1/3/5s = 2.4689 / 5.4988 / 7.5559；MR@3.6/3.0/2.0/1.8 = 0.3327 / 0.3447 / 0.3775 / 0.3834。日志为 `/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch5_test_20260807/eval/log_eval_20260807-145046.txt`。这是训练中途的 no-aggregation 基线，不是最终 CMP 聚合结果。
+- 正式 no-aggregation MTR 训练在 2026-08-07 16:36:16 正常结束：日志最后记录为 `epoch 29/30, acc_iter=13830, cur_iter=460/461`，随后输出 `End training`。因正式命令带有 `--not_eval_with_train`，训练入口明确跳过了最终评测；这避免了该脚本不正确的分布式指标汇总，最终指标均由下述独立单卡 test 产生。
+- 训练自动保留的 epoch 28/29/30 checkpoint 与 epoch 5 独立快照均已严格加载（880 个模型键、missing/unexpected 均为 0），并在相同的 2,858 条 test record、29,500 个预测目标上完成评测（Filtered=0）。其中 epoch 28、29 分别在 GPU 0、GPU 1 上独立执行，epoch 30 在 GPU 0 上独立执行；每次评测均为单进程，未混合各 GPU 的样本或指标。
+
+  | checkpoint | iter | minADE 1/3/5s | minFDE 1/3/5s | MR@3.6/3.0/2.0/1.8 |
+  | --- | ---: | --- | --- | --- |
+  | epoch 5 snapshot | 2,305 | 1.3007 / 3.0554 / 4.4001 | 2.4689 / 5.4988 / **7.5559** | 0.3327 / 0.3447 / 0.3775 / 0.3834 |
+  | epoch 28 | 12,908 | 1.1806 / 3.1383 / 4.9348 | 2.1798 / 5.9895 / 9.4701 | 0.6317 / 0.6729 / 0.7456 / 0.7580 |
+  | epoch 29 | 13,369 | 1.1875 / 3.1478 / 5.0544 | 2.1683 / 6.1815 / 9.9534 | 0.6140 / 0.6447 / 0.7178 / 0.7325 |
+  | epoch 30 | 13,830 | 1.2384 / 3.2854 / 5.2554 | 2.2775 / 6.3733 / 10.3258 | 0.6433 / 0.6621 / 0.7300 / 0.7519 |
+
+- 训练日志：`MTR/output/v2v4real_multiego_cobevt_c256_no_agg/trajectory_only_seed42/log_train_20260807-142831.txt`。epoch 28/29/30 的评测日志分别为 `/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch28_test_20260807/eval/log_eval_20260807-184238.txt`、`/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch29_test_20260807/eval/log_eval_20260807-184238.txt`、`/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch30_test_20260807/eval/log_eval_20260807-184746.txt`。
+- 在已评测的 checkpoint 中，epoch 5 是 5 秒 minFDE、5 秒 minADE 和全部报告 MR 阈值的最佳者；epoch 28 的 1 秒 minADE（1.1806）及 epoch 29 的 1 秒 minFDE（2.1683）略低，但均未改善 5 秒终点误差。故若后续只按 5 秒 minFDE 使用本阶段模型，应使用独立快照 `/home/qkb/Project/data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch2_test_20260807/checkpoint_epoch_5_snapshot.pth`，而非末轮 checkpoint。
 - CoBEVT 从随机初始化的真实训练 smoke（batch=4）已通过：`record_len=(4,)=[1,1,1,1]`、voxel 特征 `(23676,32,4)`，输出 `psm=(4,2,48,128)`、`rm=(4,14,48,128)`、融合特征 `(4,256,48,128)`；loss=1314.1504 有限，159 个梯度张量均有限，Adam step 后参数绝对变化和为 230.2341，峰值显存 6036.7 MB。
 - CoBEVT 双卡 DDP 真实 batch smoke 已以退出码 0 完成：每 rank batch=4、全局 batch=8，rank 0/1 loss 分别为 1819.8065/1566.5241，159 个梯度张量均有限，全局峰值显存为 6749.5 MB。PyTorch 仅报告一个卷积梯度 bucket stride 的性能警告，不影响数值或更新正确性。
 - 首次 CoBEVT 80 epoch 训练在 epoch 0 第 3 个混合 CAV batch 以退出码 1 终止，未生成 epoch checkpoint。根因是 `collate_batch_train` 把只供 batch=1 tracking 推理使用、长度随 in-range CAV 数变化的 `ego_transformation_matrix` 列表做 `np.array`/stack；实际混合 batch 为 `[2,2,1,2]`，因而触发不等长数组错误。模型 forward 与检测 loss 对该字段均无读取路径。
@@ -101,7 +113,8 @@
 
 ## 未完成
 
-- no-aggregation MTR 正在训练，尚未完成 30 epoch；CMP 聚合模型尚未启动，因而尚未对自训模型进行完整测试。
+- CMP 预测聚合器未启动；这是用户选择“只训练轨迹预测”后的有意范围限制，因此当前结果不能称为完整两阶段 CMP 聚合模型的结果。
+- 未保存或评测 epoch 1--4、6--27；因此 epoch 5 只能称为“已评测 checkpoint 中按 5 秒 minFDE 最优”，不能称为 30 个 epoch 的全局最优。若需要无测试集选择偏差的模型选择，应另设验证划分或在下一次训练中保存/验证全部 checkpoint。
 - 未对 Waymo 数据集执行测试；它不属于本次 V2V4Real 任务，并且环境没有安装 Waymo/TensorFlow 栈。
 
 ## 已知问题与风险
@@ -114,21 +127,22 @@
 - 单样本 smoke 指标仅用于通路验证；完整指标才是本任务的复现结果，但它们是否与论文数值完全一致仍需在相同数据版本、评测协议和权重来源下另行逐项比对。
 - 两阶段训练的完整时长取决于 train record 数、batch size 和双卡吞吐；在完成单 batch 反向和 DDP 采样审计前，不应估计为已完成或直接引用官方 checkpoint 代替自训结果。
 - 训练 checkpoint 当前只保留最近 3 个；若需在训练进行中评测特定 epoch，必须先复制其 checkpoint 到独立结果目录，避免与下一次 epoch 保存的自动清理发生竞态。
+- 这次为了回答用户的 checkpoint 性能问题，使用 test cache 比较了 epoch 5、28、29、30；这可以证明末期 checkpoint 相对已测试 epoch 5 退化，但不应把该比较作为无偏的 test-set model-selection 协议或论文最终泛化结论。
 - 固定的官方 CoBEVT checkpoint 与数据版本是本次轨迹预测复现的外部前提；因此最终结果只能支持“在官方感知输出上的轨迹预测复现”，不能声称感知模块从随机初始化已复现。
 
 ## 下一步
 
-1. 继续 no-aggregation MTR 的双卡 30 epoch 训练，保留末轮 checkpoint。
-2. 用该 checkpoint 初始化 CMP 聚合器并完成双卡 30 epoch 训练。
-3. 最终仅使用自训 CMP checkpoint 做单卡完整 minADE/minFDE/MR 评测。
+1. 当前“只训练轨迹预测”目标已完成；如需使用本阶段模型且以 5 秒 minFDE 为准，使用保存的 epoch 5 独立快照，不要默认使用 epoch 30。
+2. 如需正式选择全局最优的 no-aggregation checkpoint，重新训练时应保存每轮 checkpoint，并在独立 validation split 上选择；test 仅用于一次最终报告。
+3. 只有用户重新授权完整 CMP 两阶段复现时，才以选定的 no-aggregation checkpoint 初始化并训练预测聚合器，然后单卡完整评测。
 
 ## Git 状态
 
 - 当前分支：`codex/cmp-v2v4real-repro`。
 - 修改前基线：`main` 的 `de0f839`。
-- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）、`d7ee7da`（CoBEVT seed）、`aff428b`（DDP run/checkpoint 单写与验证聚合）、`f86d0e1`（切换为官方 CoBEVT + 自训轨迹预测）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
+- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）、`d7ee7da`（CoBEVT seed）、`aff428b`（DDP run/checkpoint 单写与验证聚合）、`f86d0e1`（切换为官方 CoBEVT + 自训轨迹预测）、`667f9ba`（记录训练启动）、`44992e9`（记录 epoch 5 评测）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
 - 恢复方式（提交后）：`git revert <任务提交>`；或切回 `main` 查看原始版本。不得删除生成数据，除非用户另行授权。
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；用户已切换为官方 CoBEVT + 自训轨迹预测，no-aggregation MTR 仍在训练；epoch 5 no-aggregation checkpoint 已完成完整单卡评测。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；用户已切换为官方 CoBEVT + 自训轨迹预测。no-aggregation MTR 的 30 epoch 训练及 epoch 5/28/29/30 完整单卡评测均已完成，聚合器未训练。
