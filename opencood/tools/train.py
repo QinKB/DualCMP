@@ -5,8 +5,10 @@
 
 import argparse
 import os
+import random
 import statistics
 
+import numpy as np
 import torch
 import tqdm
 from tensorboardX import SummaryWriter
@@ -32,6 +34,8 @@ def train_parser():
                         help='url used to set up distributed training')
     parser.add_argument('--partially_loading', default=False)
     parser.add_argument('--dataset_name', default='v2v4real')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='base random seed for Python, NumPy and PyTorch')
     opt = parser.parse_args()
     return opt
 
@@ -41,6 +45,16 @@ def main():
     hypes = yaml_utils.load_yaml(opt.hypes_yaml, opt)
 
     multi_gpu_utils.init_distributed_mode(opt)
+
+    if opt.seed is not None:
+        rank = opt.rank if opt.distributed else 0
+        process_seed = opt.seed + rank
+        random.seed(process_seed)
+        np.random.seed(process_seed)
+        torch.manual_seed(process_seed)
+        torch.cuda.manual_seed_all(process_seed)
+        print('Using base seed %d (process seed %d)' %
+              (opt.seed, process_seed))
 
     print('-----------------Dataset Building------------------')
     if opt.dataset_name == 'opv2v':

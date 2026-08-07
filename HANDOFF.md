@@ -4,7 +4,7 @@
 
 - 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
 - 验收标准：依赖和原生算子可导入；从随机初始化完成 CoBEVT 感知训练；由该自训感知模型生成 train/test 的检测、跟踪、轨迹和融合特征；随后完成 no-aggregation MTR 与 CMP 聚合模型训练，最终对自训 CMP checkpoint 做完整单卡评测。
-- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。第一次完整训练在第 3 个混合 CAV batch 暴露并定位了 collate 缺陷，修复后的同顺序 DDP smoke 已通过，待重新启动 80 epoch 训练。
+- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。第一次完整训练在第 3 个混合 CAV batch 暴露并定位了 collate 缺陷，修复后的同顺序 DDP smoke 已通过；一次修复后重启已越过该位置，但因原入口缺少全局随机种子，在 epoch 0 无 checkpoint 时有意停止。`--seed` 已加入并验证解析，待以 base seed 42 重启 80 epoch 训练。
 
 ## 背景与动机
 
@@ -73,6 +73,7 @@
 - CoBEVT 双卡 DDP 真实 batch smoke 已以退出码 0 完成：每 rank batch=4、全局 batch=8，rank 0/1 loss 分别为 1819.8065/1566.5241，159 个梯度张量均有限，全局峰值显存为 6749.5 MB。PyTorch 仅报告一个卷积梯度 bucket stride 的性能警告，不影响数值或更新正确性。
 - 首次 CoBEVT 80 epoch 训练在 epoch 0 第 3 个混合 CAV batch 以退出码 1 终止，未生成 epoch checkpoint。根因是 `collate_batch_train` 把只供 batch=1 tracking 推理使用、长度随 in-range CAV 数变化的 `ego_transformation_matrix` 列表做 `np.array`/stack；实际混合 batch 为 `[2,2,1,2]`，因而触发不等长数组错误。模型 forward 与检测 loss 对该字段均无读取路径。
 - 修复后，`collate_batch_train` 仅在 `len(batch)==1` 时保留与原先相同的 tensor `transformation_matrix_list`，多样本训练 batch 不再携带该未消费字段。用原训练的 `DistributedSampler.set_epoch(0)` 顺序在双卡真实模型上执行 3 次更新：rank 1 的第 3 个 batch 正是 `[2,2,1,2]`，两 rank 均完成前向、loss、反向和 step；159 个梯度张量均有限，峰值显存为 8722.7 MB。单样本 test collate 保持矩阵形状 `(1,1,4,4)`。
+- 修复后一次 CoBEVT 重新启动已正常越过第 38 个训练 step，GPU 利用率为 100%，显存约 18.7/19.4 GB，loss 有限；它在 epoch 0 尚未生成 checkpoint 时被有意停止，因为原 `opencood/tools/train.py` 没有对 Python、NumPy 和 PyTorch 设置训练随机种子。现已添加 `--seed`：每个 DDP process 使用 `base_seed + rank`（本次为 42/43），模型会在 DDP 建立时由 rank 0 同步参数，数据增强/worker 随机流则按 rank 分离。`--help` 与 `py_compile` 均已验证该入口。
 
 ## 修改内容
 
@@ -85,6 +86,7 @@
 - `MTR/tools/train_multiego.py`：使 `--not_eval_with_train` 同时跳过训练结束后的最终评测，避免 DDP 下未聚合的自定义指标被误当作完整结果。
 - `MTR/mtr/datasets/v2v4real_multiego_dataset.py`：拒绝不受支持的 batch_size>1，避免静默丢弃场景。
 - `opencood/data_utils/v2v4real/datasets/intermediate_fusion_dataset_multi_ego.py`：训练时不堆叠不等长且不参与模型/loss 的 tracking 变换矩阵；仍为 batch-size-one 推理保留原有 tensor 接口。
+- `opencood/tools/train.py`：增加 `--seed`，在建立 dataset/model 前初始化 Python、NumPy 与 PyTorch 的每-rank 随机状态。
 - `MTR/tools/train_multiego.py` 与 `MTR/tools/train_utils/train_utils.py`：加入正确缩放 loss、只在每个累积组末尾更新参数/调度器、DDP 中间 micro-batch 不同步梯度的 `--grad_accum_steps` 支持。
 - YAML 静态检查：MTR 的 4 个 V2V4Real 配置及 OpenCOOD 的 CoBEVT 1x、CoBEVT 256x、SinBEVT 配置均可由 PyYAML 解析；`point_pillar_v2vnet_multiego_v2v4real.yaml` 在当前和 `de0f839` 基线中都在 `preprocess.args.voxel_size` 存在同一处过度缩进，因而都不能解析。本次只替换了其数据路径，没有修复未使用的上游 V2VNet 配置语义。
 
@@ -116,9 +118,9 @@
 
 - 当前分支：`codex/cmp-v2v4real-repro`。
 - 修改前基线：`main` 的 `de0f839`。
-- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
+- 已提交的相关检查点：`9491046`（本机路径/缓存/推理修复）、`92997c6`（smoke cache 安全）、`3e84a44`（跳过不安全的分布式评测）、`4c5ffb0`（MTR batch 语义与梯度累积）、`889abe8`（CoBEVT 混合 CAV batch）。下载权重、缓存、特征和运行日志均在 Git 忽略路径中。
 - 恢复方式（提交后）：`git revert <任务提交>`；或切回 `main` 查看原始版本。不得删除生成数据，除非用户另行授权。
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；已修复 CoBEVT 训练的混合 CAV collate 根因，下一步为重新启动完整自训感知阶段。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；已补齐 CoBEVT 的全局随机种子入口，下一步为以 seed 42 重新启动完整自训感知阶段。
