@@ -2,9 +2,9 @@
 
 ## 当前任务
 
-- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 从训练阶段复现 CMP 的 V2V4Real 流程。
-- 验收标准：依赖和原生算子可导入；从随机初始化完成 CoBEVT 感知训练；由该自训感知模型生成 train/test 的检测、跟踪、轨迹和融合特征；随后完成 no-aggregation MTR 与 CMP 聚合模型训练，最终对自训 CMP checkpoint 做完整单卡评测。
-- 当前状态（2026-08-07）：官方权重的完整测试与官方特征预处理已完成；自训 CoBEVT 的单卡和双卡真实 batch 反向 smoke 均已通过。正式 base seed=42 的 80 epoch CoBEVT DDP run 已启动并完成第 1 个 epoch、写出可加载 checkpoint 与全量验证 loss；当前正在第 2 个 epoch。此前在 epoch 0 停止的三次短运行仅用于定位 mixed-CAV collate、全局 seed 与 DDP 记录缺陷，均没有被用作最终 checkpoint。
+- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 固定官方 CoBEVT 感知 checkpoint、只从训练阶段复现 CMP 的轨迹预测部分。
+- 验收标准：依赖和原生算子可导入；官方 CoBEVT 生成的 train/test 融合特征、检测与跟踪结果可用；从随机初始化训练 no-aggregation MTR，再以其初始化 CMP 预测聚合器；最终对自训 CMP checkpoint 做完整单卡 minADE/minFDE/MR 评测。
+- 当前状态（2026-08-07）：用户已明确切换为“只训练轨迹预测”。自训 CoBEVT DDP 进程已安全停止，保留其 epoch 1 checkpoint 和日志但不再用作最终结果。官方 CoBEVT 特征、tracking 和 MTR train/test cache 已完整，no-aggregation MTR 双卡训练待启动。
 
 ## 背景与动机
 
@@ -61,8 +61,8 @@
 ### 训练复现审计（进行中）
 
 - 实际训练入口为 `MTR/tools/train_multiego.py`：训练循环执行 `loss.backward()` 和 `optimizer.step()`，并保存带 optimizer state 的 checkpoint。
-- 配置表明作者采用两阶段初始化：`v2v4real_multiego_cobevt_c256_no_agg.yaml` 的 `PRETRAINED_MOTION_TRANSFORMER` 为空，应从随机初始化训练；聚合版 `v2v4real_multiego_cobevt_c256.yaml` 会加载 no-aggregation MTR，并对 MTR 使用 1/100 学习率、对 aggregation 模块使用完整学习率。为“从训练开始”复现，第二阶段将指向本机第一阶段的自训 checkpoint，而不是官方 no-aggregation 权重。
-- 审计时发现 train 缺少 CoBEVT 融合特征和 AB3DMOT 跟踪轨迹；GT train 数据已存在（64 个 scenario-CAV pickle）。训练感知 loader 有 32 个场景、14,210 个样本。
+- 配置表明作者采用两阶段初始化：`v2v4real_multiego_cobevt_c256_no_agg.yaml` 的 `PRETRAINED_MOTION_TRANSFORMER` 为空，应从随机初始化训练；聚合版 `v2v4real_multiego_cobevt_c256.yaml` 会加载 no-aggregation MTR，并对 MTR 使用 1/100 学习率、对 aggregation 模块使用完整学习率。第二阶段将指向本机第一阶段的自训 checkpoint，而不是官方 no-aggregation 权重。
+- 用户于 2026-08-07 明确选择固定官方 CoBEVT、只训练轨迹预测；官方 `net_epoch75.pth` 位于 `pretrained/v2v4real/point_pillar_cobevt_multiego_256x/`，大小 739,231,572 bytes。该模型生成的 17,902 个融合特征、64 个 train tracking pickle、18 个 test tracking pickle，以及对应 MTR cache 已实际核验存在。
 - 已完成 11 帧真实 train 感知 smoke：官方 epoch 75 CoBEVT checkpoint 可加载并前向。为防止 smoke 污染后续训练，本任务修正了 `--max_frames`：它不再生成不完整的 tracking cache。该 smoke 未写 detection/tracking cache，留下的少量 train 融合特征可由完整预处理安全复用。
 - train/test 目录有一个同名场景 `testoutput_CAV_data_2022-03-15-09-54-40_0`；比对结果为 294 个 YAML、294 个 PCD 和目录差异均为 0，即原始数据集本身的重复场景。融合特征的同名文件因此语义一致；为复现作者的原始切分，本任务不擅自移除该重复，但将其标记为数据泄露风险。
 - 双卡训练可使用 `DistributedSampler` 和 DDP；但 `eval_one_epoch_custom` 没有跨进程聚合。`train_multiego.py` 的 `--not_eval_with_train` 原先仍会在训练后调用该分布式评测，现已修正为完整跳过它。双卡训练只生成 checkpoint，最终指标统一用单卡完整评测产生。
@@ -97,8 +97,6 @@
 
 ## 未完成
 
-- 从随机初始化完成 CoBEVT c256 的 80 epoch 双卡训练；当前已有的感知特征来自官方 epoch 75 权重，只能用作后续 MTR 通路验证，不能作为“从训练开始”的最终结果。
-- 用自训 CoBEVT checkpoint 分别生成 train 和 test 的融合特征、检测 cache 与 AB3DMOT 跟踪轨迹，并重建隔离的 MTR cache。
 - no-aggregation 和 CMP 聚合模型的自训 checkpoint 尚未生成，因而尚未对自训模型进行完整测试。
 - 未对 Waymo 数据集执行测试；它不属于本次 V2V4Real 任务，并且环境没有安装 Waymo/TensorFlow 栈。
 
@@ -111,14 +109,13 @@
 - 全量融合特征约 24 GB、MTR checkpoint 约 2.5 GB，均为可再下载/再生成的忽略文件，不随 Git 提交。
 - 单样本 smoke 指标仅用于通路验证；完整指标才是本任务的复现结果，但它们是否与论文数值完全一致仍需在相同数据版本、评测协议和权重来源下另行逐项比对。
 - 两阶段训练的完整时长取决于 train record 数、batch size 和双卡吞吐；在完成单 batch 反向和 DDP 采样审计前，不应估计为已完成或直接引用官方 checkpoint 代替自训结果。
-- CoBEVT 训练配置含随机数据增强；本次已通过 `--seed 42` 固定训练进程与 MTR 的随机状态，但 CUDA 算子及 DataLoader worker 仍未被强制为 deterministic，因此不承诺与作者训练或重复运行的 bitwise 完全一致，只以相同代码、数据、配置、seed 和训练轮数复现。
-- CoBEVT 全精度 DDP 运行在混合 CAV batch 上的 NVIDIA 显存最高观测为约 22.9 GB（RTX 3090 总计 24 GB），尚未发生 OOM；最终运行需持续监控。若出现真实 OOM，将使用同一源码提供的 `--half` AMP 分支重跑并明确标注，不能通过减少数据、CAV 或训练轮数掩盖问题。
+- 固定的官方 CoBEVT checkpoint 与数据版本是本次轨迹预测复现的外部前提；因此最终结果只能支持“在官方感知输出上的轨迹预测复现”，不能声称感知模块从随机初始化已复现。
 
 ## 下一步
 
-1. 继续正式 CoBEVT c256 80 epoch DDP 训练（seed=42、rank 0 单写、验证 all-reduce），记录实际 checkpoint、训练/验证 loss 和显存。
-2. 用自训感知 checkpoint 重新生成隔离的 train/test 特征与跟踪结果，并重建 MTR cache。
-3. 启动 no-aggregation MTR，再以该 checkpoint 初始化 CMP 聚合器；最终仅用自训 CMP checkpoint 单卡评测。
+1. 使用官方 CoBEVT 特征，启动 no-aggregation MTR 的双卡 30 epoch 训练（每 rank 1 个场景、累积 4 步，等效全局 batch 8）。
+2. 用该 checkpoint 初始化 CMP 聚合器并完成双卡 30 epoch 训练。
+3. 最终仅使用自训 CMP checkpoint 做单卡完整 minADE/minFDE/MR 评测。
 
 ## Git 状态
 
@@ -129,4 +126,4 @@
 
 ## 更新时间
 
-- 2026-08-07，本次 CMP V2V4Real 复现任务；正式 CoBEVT 第 1 个 epoch 已完成且全局 validation loss 已落盘，当前继续第 2/80 epoch。
+- 2026-08-07，本次 CMP V2V4Real 复现任务；用户已切换为官方 CoBEVT + 自训轨迹预测，下一步为启动 no-aggregation MTR。
