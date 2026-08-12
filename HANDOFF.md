@@ -2,9 +2,19 @@
 
 ## 当前任务
 
-- 用户目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 与固定官方 CoBEVT 感知 checkpoint，从训练开始复现 CMP 的轨迹预测部分（no-aggregation MTR）。
-- 验收标准：依赖和原生算子可导入；官方 CoBEVT 生成的 train/test 融合特征、检测与跟踪结果可用；no-aggregation MTR 从随机初始化完成 30 epoch 训练；对可用 checkpoint 做完整单卡 minADE/minFDE/MR 评测。用户已将 CMP 预测聚合器训练排除在本轮范围之外。
-- 当前状态（2026-08-07 18:51）：no-aggregation MTR 双卡 30 epoch 训练已完成；epoch 5、28、29、30 均已在同一 test cache 上完成独立单卡评测。按用户关注的 5 秒 minFDE，epoch 5 独立快照为已测试 checkpoint 中最优（7.5559）；末轮 epoch 30 为 10.3258。聚合器尚未启动，符合“只训练轨迹预测”的当前范围。
+- 用户目标已转为：基于 CMP/V2V4Real 设计可投稿 T-ITS 的端到端协同轨迹预测模型；先完成研究设计和独立审查，不写模型代码、不直接启动完整训练。
+- 当前候选模型为 CoJTP：融合 BEV/持续查询只负责形成因果在线车辆历史；预测侧保留 `observer × time` 的融合前 actor evidence；每个粗联合未来在 HCER 层内执行场景级来源路由、对象级证据相关、同世界多车交互和轨迹残差精修；最终输出共享场景概率的联合未来分布。
+- 唯一整体主张：跨视角遮挡和多车交互不确定性下，预测证据不应在联合未来假设形成前被压成假设无关表示；应把来源—时间证据的最终聚合放入完整场景假设内部。
+- 设计文档：`model_design.md`。已纳入 `/home/qkb/Project/CoLIF/docs/colif_failure_postmortem.md` 和 `/home/qkb/Project/CoLIF/HANDOFF.md` 的失败约束。
+- 三类独立审查已完成两轮：原“persistent query + aligned fused evidence + actor×world”被判为 CoopTrack/PnPNet-MASAR/QCNeXt 式拼装风险，已废弃为核心主张；改版 HCER 的精确交集尚未发现完全等价工作，但必须通过 A/B/C/D、粗未来条件、来源/时间干预和联合场景指标，不能把普通 mode attention 或 source routing 称为首次。
+- 理论审查要求已写入：历史/未来统一坐标、GT/mask 不进入 forward、`grid_sample` 连续采样、有界 Laplace/von-Mises 参数、scene-wise logsumexp、运行时 candidate mask 与 anti-leak 测试。
+- 工程审查要求已写入：CAV0 `Car` canonical GT、strict split 重训前端、精简无 `detach` CoBEVT core、逐帧压缩 source token、持续查询 Stage-1 门禁，以及真实 11 帧 future-only BPTT/显存门禁。当前不能声称可直接完整训练。
+- 当前没有实现新模型代码、没有运行长训练、没有使用 test 选择新模型。
+
+## 历史复现任务
+
+- 旧目标：在 conda 的 `coop` 环境中，使用 `/home/qkb/Project/data/V2V4Real` 与固定官方 CoBEVT 感知 checkpoint，从训练开始复现 CMP 的 no-aggregation MTR。
+- 旧任务状态（2026-08-07 18:51）：no-aggregation MTR 双卡 30 epoch 训练已完成；epoch 5、28、29、30 均已在同一 test cache 上完成独立单卡评测。按 5 秒 minFDE，epoch 5 独立快照为已测试 checkpoint 中最优（7.5559）；末轮 epoch 30 为 10.3258。聚合器未启动。
 
 ## 背景与动机
 
