@@ -1,0 +1,420 @@
+{
+  "content_sha256": "f0a57678cd91946d8e960f18f690c8ae3d97d975f0ca895a9e448057614e107a",
+  "excluded_duplicates": [
+    {
+      "excluded_split": "train",
+      "kept_split": "test",
+      "scene_id": "testoutput_CAV_data_2022-03-15-09-54-40_0",
+      "source_root": "/data/V2V4Real/train"
+    }
+  ],
+  "provenance": {
+    "input_roots": {
+      "test": "/data/V2V4Real/test",
+      "train": "/data/V2V4Real/train",
+      "val": "/data/V2V4Real/val"
+    },
+    "policy": "scene_basename_disjoint_priority",
+    "priority": [
+      "test",
+      "val",
+      "train"
+    ]
+  },
+  "splits": {
+    "test": [
+      {
+        "frame_counts": {
+          "0": 147,
+          "1": 147
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-09-54-40_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 114,
+          "1": 114
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-29-43_3",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 144,
+          "1": 144
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-29-43_4",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 198,
+          "1": 198
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-10-50-46_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 180,
+          "1": 180
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-10-50-46_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 310,
+          "1": 310
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-11-02-23_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 304,
+          "1": 304
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-11-02-23_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 221,
+          "1": 221
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-11-51-42_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      },
+      {
+        "frame_counts": {
+          "0": 375,
+          "1": 375
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_7",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/test"
+      }
+    ],
+    "train": [
+      {
+        "frame_counts": {
+          "0": 405,
+          "1": 405
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-09-54-40_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 157,
+          "1": 157
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-09-54-40_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 1244,
+          "1": 1244
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-09-50_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 133,
+          "1": 133
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-09-50_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 217,
+          "1": 217
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-29-43_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 122,
+          "1": 122
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-10-29-43_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 148,
+          "1": 148
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-16-00-17_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 410,
+          "1": 410
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-10-43-13",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 315,
+          "1": 315
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-10-50-46_3",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 119,
+          "1": 119
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-11-51-42_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 107,
+          "1": 107
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-11-51-42_7",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 124,
+          "1": 124
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-12-04-22_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 89,
+          "1": 89
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-12-14-33_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 80,
+          "1": 80
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-12-14-33_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 145,
+          "1": 145
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-44-47_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 293,
+          "1": 293
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-44-47_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 111,
+          "1": 111
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-44-47_3",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 183,
+          "1": 183
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-44-47_5",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 177,
+          "1": 177
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-44-47_6",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 275,
+          "1": 275
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-14-59-30_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 286,
+          "1": 286
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-15-55-26_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 229,
+          "1": 229
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-15-55-26_1",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 120,
+          "1": 120
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-17-16-06-11_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 168,
+          "1": 168
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_2",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 450,
+          "1": 450
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_3",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 135,
+          "1": 135
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_4",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 143,
+          "1": 143
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_5",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 149,
+          "1": 149
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_6",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 165,
+          "1": 165
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_8",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 151,
+          "1": 151
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_9",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      },
+      {
+        "frame_counts": {
+          "0": 108,
+          "1": 108
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-50-20_10",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/train"
+      }
+    ],
+    "val": [
+      {
+        "frame_counts": {
+          "0": 409,
+          "1": 427
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-15-15-20-01_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/val"
+      },
+      {
+        "frame_counts": {
+          "0": 117,
+          "1": 117
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_0",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/val"
+      },
+      {
+        "frame_counts": {
+          "0": 222,
+          "1": 222
+        },
+        "scene_id": "testoutput_CAV_data_2022-03-21-09-35-07_10",
+        "source_count": 2,
+        "source_root": "/data/V2V4Real/val"
+      }
+    ]
+  },
+  "version": 1
+}

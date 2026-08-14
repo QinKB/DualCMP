@@ -119,22 +119,29 @@ class MTRDecoder(nn.Module):
             intention_points = {}
             for cur_type in self.object_type:
                 cur_intention_points = intention_points_dict[cur_type]
-                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2).cuda()
-                intention_points[cur_type] = cur_intention_points
+                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2)
+                buffer_name = '_intention_points_' + cur_type.lower()
+                self.register_buffer(buffer_name, cur_intention_points, persistent=False)
+                intention_points[cur_type] = buffer_name
 
             intention_query_mlps = common_layers.build_mlps(
                 c_in=d_model, mlp_channels=[d_model, d_model], ret_before_act=True
             )
         else:
-            intention_points_file = cfg.ROOT_DIR / self.model_cfg.INTENTION_POINTS_FILE
+            from pathlib import Path
+            intention_points_file = Path(self.model_cfg.INTENTION_POINTS_FILE)
+            if not intention_points_file.is_absolute():
+                intention_points_file = cfg.ROOT_DIR / intention_points_file
             with open(intention_points_file, 'rb') as f:
                 intention_points_dict = pickle.load(f)
 
             intention_points = {}
             for cur_type in self.object_type:
                 cur_intention_points = intention_points_dict[cur_type]
-                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2).cuda()
-                intention_points[cur_type] = cur_intention_points
+                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2)
+                buffer_name = '_intention_points_' + cur_type.lower()
+                self.register_buffer(buffer_name, cur_intention_points, persistent=False)
+                intention_points[cur_type] = buffer_name
 
             intention_query_mlps = common_layers.build_mlps(
                 c_in=d_model, mlp_channels=[d_model, d_model], ret_before_act=True
@@ -199,7 +206,7 @@ class MTRDecoder(nn.Module):
             raise NotImplementedError
         else:
             intention_points = torch.stack([
-                self.intention_points[center_objects_type[obj_idx]]
+                getattr(self, self.intention_points[center_objects_type[obj_idx]])
                 for obj_idx in range(num_center_objects)], dim=0)
             intention_points = intention_points.permute(1, 0, 2)  # (num_query, num_center_objects, 2)
 
@@ -358,6 +365,7 @@ class MTRDecoder(nn.Module):
             raise NotImplementedError
 
         assert len(pred_list) == self.num_decoder_layers
+        self.forward_ret_dict['query_content_list'] = query_content
         return pred_list
 
     def get_decoder_loss(self, tb_pre_tag=''):

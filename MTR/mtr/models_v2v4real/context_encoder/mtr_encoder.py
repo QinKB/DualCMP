@@ -155,12 +155,15 @@ class MTREncoder(nn.Module):
               input_dict:
         """
         input_dict = batch_dict['input_dict']
-        obj_trajs, obj_trajs_mask = input_dict['obj_trajs'].cuda(), input_dict['obj_trajs_mask'].cuda() 
+        obj_trajs = input_dict['obj_trajs']
+        obj_trajs_mask = input_dict['obj_trajs_mask']
         # map_polylines = input_dict['map_polylines'].cuda()
         batch_sample_count = batch_dict['batch_sample_count']
-        obj_trajs_last_pos = input_dict['obj_trajs_last_pos'].cuda() 
+        obj_trajs_last_pos = input_dict['obj_trajs_last_pos']
         # map_polylines_center = input_dict['map_polylines_center'].cuda() 
-        track_index_to_predict = input_dict['track_index_to_predict']
+        track_index_to_predict = input_dict['track_index_to_predict'].to(
+            device=obj_trajs.device, dtype=torch.long
+        )
 
         assert obj_trajs_mask.dtype == torch.bool
 

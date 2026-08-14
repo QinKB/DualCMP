@@ -75,12 +75,17 @@ class PointPillarCoBEVT(nn.Module):
         for p in self.reg_head.parameters():
             p.requires_grad = False
 
-    def forward(self, data_dict):
+    def encode_fused_bev(self, data_dict):
+        """Encode receiver-aligned multi-CAV voxels without detaching gradients.
+
+        The method is the single differentiable entry point shared by the
+        legacy CoBEVT detector and CoLIF.  Source point clouds are already in
+        the receiver frame; this function therefore performs no second warp.
+        """
         voxel_features = data_dict['processed_lidar']['voxel_features']
         voxel_coords = data_dict['processed_lidar']['voxel_coords']
         voxel_num_points = data_dict['processed_lidar']['voxel_num_points']
         record_len = data_dict['record_len']
-        spatial_correction_matrix = data_dict['spatial_correction_matrix']
 
         batch_dict = {'voxel_features': voxel_features,
                       'voxel_coords': voxel_coords,
@@ -125,6 +130,18 @@ class PointPillarCoBEVT(nn.Module):
                           new_w=regroup_feature.shape[4])  # 4, 48, 176, 1, 5
 
         fused_feature = self.fusion_net(regroup_feature, com_mask)  # 4, 256, 48, 176
+
+        return {
+            'source_bev': spatial_features_2d,
+            'regrouped_source_bev': regroup_feature,
+            'fused_bev': fused_feature,
+            'cav_mask': mask,
+        }
+
+    def forward(self, data_dict):
+        features = self.encode_fused_bev(data_dict)
+        spatial_features_2d = features['source_bev']
+        fused_feature = features['fused_bev']
 
         psm = self.cls_head(fused_feature)  # 4, 2, 48, 176
         rm = self.reg_head(fused_feature)  # 4, 14, 48, 176

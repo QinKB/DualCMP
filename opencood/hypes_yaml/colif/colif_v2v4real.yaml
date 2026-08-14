@@ -1,0 +1,300 @@
+name: colif_fused_v2v4real
+root_dir: /home/qkb/Project/data/V2V4Real/train
+validate_dir: /home/qkb/Project/data/V2V4Real/test
+test_dir: /home/qkb/Project/data/V2V4Real/test
+yaml_parser: load_point_pillar_params
+
+wild_setting:
+  async: false
+  async_mode: synchronous
+  async_overhead: 0
+  seed: 20
+  loc_err: false
+
+train_params:
+  # 1=fused persistent-query tracking; 2=cooperative motion forecasting.
+  # Same-checkpoint experiments rejected every tested future-to-tracking
+  # recurrence, so the released path keeps tracking forecast-independent.
+  phase: 1
+  batch_size: 1
+  epoches: 20
+  eval_freq: 1
+  save_freq: 1
+  max_cav: &max_cav 2
+  num_workers: 4
+  amp: true
+  # Stage 1 updates the LiDAR/query trunk in FP32.  Stage 2 keeps that trunk
+  # frozen and uses AMP for MTR plus the bounded future adapter.
+  amp_phases: [2]
+  # CMP-normalized MTR sums 50 future-step NLLs per actor.  Starting the
+  # scaler at 128 overflows its genuine early gradients; scale 1 preserves the
+  # objective and lets GradScaler adapt instead of weakening the GMM loss.
+  amp_init_scale: 1
+  bptt_len: 4
+  # Tracking uses causal burn-in.  Phase 2 uses the full 11-frame online
+  # history but does not back-propagate a future cue into tracking.
+  phase1_warmup_length: 7
+  phase1_unroll_length: 4
+  phase2_warmup_length: 0
+  phase2_unroll_length: 11
+  phase2_future_prior_mode: none
+  max_grad_norm: 5.0
+  # Preserve the released CMP/MTR optimization contract once its 50-step
+  # actor-summed NLL is restored.  Phase 1 continues to use the tighter 5.0
+  # clip above for the perception/query tracker.
+  phase2_max_grad_norm: 1000.0
+  grad_accum_steps: 1
+  seed: 20
+
+fusion:
+  core_method: ColifSequenceDataset
+  args:
+    receiver_ids: [0]
+    frame_period_s: 0.1
+    unroll_length: 4
+    clip_stride: 4
+    future_frames: 50
+    max_actors: 128
+    max_cav: *max_cav
+    delay_mode: synthetic
+    async_overhead_ms: 0
+    runtime_only: false
+    runtime_forbid_gt: true
+    target_visibility_rule: point_support
+    target_min_points: 3
+    canonical_min_stable_frames: 2
+    canonical_max_step_m: 10.0
+
+preprocess:
+  core_method: SpVoxelPreprocessor
+  args:
+    voxel_size: &voxel_size [0.4, 0.4, 8]
+    max_points_per_voxel: 32
+    max_voxel_train: 32000
+    max_voxel_test: 70000
+  cav_lidar_range: &cav_lidar [-102.4, -38.4, -5, 102.4, 38.4, 3]
+
+# Per-source random geometry would break a shared receiver grid.  It stays off
+# until a clip-consistent receiver-frame augmenter is explicitly implemented.
+data_augment: []
+
+postprocess:
+  core_method: VoxelPostprocessor
+  anchor_args:
+    cav_lidar_range: *cav_lidar
+    l: 3.9
+    w: 1.6
+    h: 1.56
+    r: [0, 90]
+    feature_stride: 4
+    num: &anchor_num 2
+  target_args:
+    pos_threshold: 0.6
+    neg_threshold: 0.45
+    score_threshold: 0.2
+  order: hwl
+  max_num: 100
+  nms_thresh: 0.15
+
+model:
+  core_method: point_pillar_colif
+  args:
+    max_cav: *max_cav
+    voxel_size: *voxel_size
+    lidar_range: *cav_lidar
+    anchor_number: *anchor_num
+    # Matches the released CMP c256 CoBEVT checkpoint exactly.
+    compression: 256
+    backbone_fix: false
+    pillar_vfe:
+      use_norm: true
+      with_distance: false
+      use_absolute_xyz: true
+      num_filters: [64]
+    point_pillar_scatter:
+      num_features: 64
+    base_bev_backbone:
+      layer_nums: [3, 5, 8]
+      layer_strides: [2, 2, 2]
+      num_filters: [64, 128, 256]
+      upsample_strides: [1, 2, 4]
+      num_upsample_filter: [128, 128, 128]
+    shrink_header:
+      kernal_size: [3]
+      stride: [2]
+      padding: [1]
+      dim: [256]
+      input_dim: 384
+    fax_fusion:
+      input_dim: 256
+      agent_size: 2
+      dim_head: 32
+      window_size: 4
+      depth: 3
+      mlp_dim: 256
+      drop_out: 0.1
+      mask: true
+    persistent_query:
+      input_dim: 256
+      hidden_dim: 256
+      num_queries: 128
+      nheads: 8
+      enc_layers: 2
+      dec_layers: 3
+      dim_feedforward: 1024
+      dropout: 0.1
+      enc_n_points: 4
+      dec_n_points: 4
+      prior_probability: 0.01
+      default_hwl: [1.56, 1.6, 3.9]
+    # Sparse measurements are decoded from this same CoBEVT instance's psm/rm
+    # heads and only seed inactive persistent slots; this is not a second model.
+    measurement_proposals:
+      max_proposals: 48
+      pre_topk: 256
+      score_threshold: 0.05
+      suppression_radius: 2.0
+      match_distance: 4.0
+      anchor_dims_hwl: [1.56, 1.6, 3.9]
+      anchor_rotations_deg: [0, 90]
+    measurement_state_update:
+      min_gain: 0.1
+      max_gain: 0.95
+      initial_gain: 0.75
+      innovation_scale_m: 4.0
+    actor_cooperative_fusion:
+      enabled: true
+      input_dim: 256
+      heads: 8
+      patch_radius_m: 4.0
+      patch_size: 3
+      dropout: 0.1
+      geometry_conditioning: true
+      source_index_embedding: false
+    state:
+    # Keep at most eleven causal online observations for robust motion anchors.
+      memory_len: 11
+      # Preserve the Phase-1 tracker GRU's four-step input contract; the
+      # longer history is consumed only by the motion forecaster.
+      tracker_memory_len: 4
+      miss_ttl: 4
+      max_active_queries: 24
+      # Query objectness is fused with CMP's dense cooperative heatmap.
+      birth_threshold: 0.3
+      keep_threshold: 0.2
+      birth_suppression_radius: 2.0
+    forecast:
+      architecture: motion_anchored
+      enabled: false
+      history_frames: 11
+      frame_period_s: 0.1
+      # Kept for the optional cmp_mtr ablation; the selected motion-anchored
+      # head uses frame_period_s directly.
+      cmp_timestamp_scale: 0.1
+      context_neighbors: 16
+      context_mlp_channels: 256
+      context_mlp_layers: 3
+      context_dim: 256
+      context_layers: 6
+      context_heads: 8
+      context_local_attention: true
+      modes: 6
+      future_frames: 50
+      d_model: 512
+      decoder_layers: 6
+      attention_heads: 8
+      map_d_model: 256
+      dropout: 0.1
+      intention_random_init: false
+      intention_points_file: /home/qkb/Project/CoLIF/preprocessed_data/v2v4real/v2v4real_cluster_64_center_dict.pkl
+      nms_distance: 2.5
+      # A single 3D observation cannot identify motion.  The persistent state
+      # is born immediately, but long-horizon forecasting starts only after a
+      # second causal observation.  Equally young actors are kept out of the
+      # interaction context so they cannot corrupt mature center predictions.
+      min_forecast_history_steps: 2
+      min_context_history_steps: 2
+      motion_anchor_scales: [0.0, 0.5, 0.75, 1.0, 1.25, 1.5]
+      mode_interaction: actor_conditioned
+      temporal_history: true
+      # Default: cross-mode is training-only deep supervision and proposal is
+      # served.  The optional complete branch is selected with
+      # --forecast-refinement-type trajectory_source
+      # --forecast-inference-layer refined; both configurations are retained.
+      proposal_refinement: true
+      refinement_type: cross_mode
+      inference_layer: proposal
+      history_encoder_layers: 2
+      history_encoder_heads: 8
+      history_encoder_ffn: 1024
+      motion_context_layers: 2
+      motion_context_heads: 8
+      motion_context_ffn: 1024
+      motion_residual_limit_m: 12.0
+      # Query yaw is a direct neural measurement whereas CMP trained MTR on
+      # AB3DMOT-filtered headings.  Restore that causal smoothing at the
+      # adapter boundary before applying CMP's legacy degree-valued transform.
+      heading_smoothing_steps: 5
+      # Ages 1--11 already occur naturally when every causal training clip
+      # starts from an empty online state.  Extra random truncation previously
+      # made mature histories a tiny minority and damaged the dominant test
+      # distribution.
+      history_truncation_probability: 0.0
+    future_adapter:
+      # Retained only for historical checkpoint compatibility.  The main path
+      # never writes forecast latents directly into query content.
+      mode: none
+      phase2_mode: none
+      gate_max: 0.25
+      clip_norm: 4.0
+      dropout_probability: 0.3
+    forecast_motion_prior:
+      mode: none
+      phase2_mode: none
+      frame_period_s: 0.1
+      horizon_steps: 5
+      cv_component_weight: 0.15
+      cv_std_m: 1.0
+      min_std_m: 0.25
+      max_std_m: 3.0
+      mahalanobis_gate: 3.0
+      absolute_gate_m: 8.0
+      proposal_score_weight: 0.25
+
+loss:
+  core_method: colif_loss
+  args:
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    matcher:
+      cost_class: 2.0
+      cost_center: 1.0
+      cost_box: 0.25
+      max_center_distance: 12.0
+      supervision_ttl: 5
+    weights:
+      aux_detection: 0.2
+      existence: 1.0
+      box: 2.0
+      velocity: 0.25
+      decoder_aux: 0.5
+      gmm: 1.0
+      mode: 1.0
+      dense_gmm: 1.0
+
+optimizer:
+  core_method: AdamW
+  # Phase 2 jointly learns the randomly initialized forecast head and
+  # actor-source fusion.  Keep their peak learning rates identical.
+  lr: 0.0001
+  trunk_lr_scale: 0.1
+  forecast_lr_scale: 1.0
+  args:
+    weight_decay: 0.0001
+
+lr_scheduler:
+  core_method: cosineannealwarm
+  epoches: 20
+  warmup_lr: 0.00002
+  warmup_epoches: 2
+  lr_min: 0.000002
