@@ -35,6 +35,7 @@ from opencood.tools.colif.eval_utils import (
     build_colif_evaluation_loader,
     evaluate_colif_strict_online,
 )
+from opencood.tools.colif.receiver_protocol import apply_receiver_override
 
 
 def _arguments():
@@ -55,6 +56,10 @@ def _arguments():
     parser.add_argument("--grad-accum-steps", type=int)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--receiver-ids",
+        help="Comma-separated CAV IDs; use 0 for one ego or 0,1 for CMP-style multi-ego",
+    )
     parser.add_argument(
         "--observation-score-threshold", type=float,
         help="Override lifecycle keep threshold; birth remains no lower than keep",
@@ -146,6 +151,7 @@ def main() -> None:
     args = _arguments()
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     hypes = load_yaml(args.hypes_yaml)
+    receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
     if args.disable_actor_cooperative_fusion:
         hypes["model"]["args"]["actor_cooperative_fusion"]["enabled"] = False
     if args.disable_temporal_history:
@@ -319,6 +325,7 @@ def main() -> None:
             "grad_accum_steps": grad_accum_steps,
             "updates_per_epoch": updates_per_epoch,
             "world_size": world_size,
+            "receiver_ids": list(receiver_ids),
         }})
     evaluation_dataset = None
     evaluation_loader = None
@@ -336,6 +343,7 @@ def main() -> None:
                 "evaluation_records_rank0": len(evaluation_loader),
                 "evaluation_sequence_sharding": "whole_scene_receiver",
                 "evaluation_metric_sync": "all_reduce_raw_sums_and_counts",
+                "receiver_ids": list(receiver_ids),
             }})
     amp_phases = tuple(
         int(value)

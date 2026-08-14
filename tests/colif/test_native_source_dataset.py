@@ -1,6 +1,7 @@
 import numpy as np
 
 from opencood.data_utils.v2v4real.datasets.colif_sequence_dataset import (
+    ColifSequenceDataset,
     points_for_split,
     source_to_receiver_transform,
 )
@@ -47,3 +48,17 @@ def test_transform_rotation_and_translation_are_receiver_centric() -> None:
     receiver[1, 3] = 3.0
     expected = np.linalg.inv(receiver) @ source
     np.testing.assert_allclose(source_to_receiver_transform(source, receiver), expected)
+
+
+def test_selected_receiver_occupies_slot_zero() -> None:
+    class Index:
+        @staticmethod
+        def source_ids(_scene_id):
+            return ("0", "1")
+
+    dataset = object.__new__(ColifSequenceDataset)
+    dataset.index = Index()
+    dataset.max_cav = 2
+
+    assert dataset._source_ids_for_receiver("scene_a", "0") == ("0", "1")
+    assert dataset._source_ids_for_receiver("scene_a", "1") == ("1", "0")

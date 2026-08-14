@@ -9,6 +9,16 @@ Phase 2: 冻结感知/跟踪，训练cooperative motion forecast
 
 正式协议为 official `train` 优化、固定末轮自动评测 official `test`；不构造 val、不按 test 指标自动选择 best。论文必须披露 repeated-test monitoring。
 
+## Receiver / ego 协议
+
+默认 `receiver_ids: [0]`，即只以 CAV 0 为 receiver。若要严格采用 CMP 的 multi-ego 数据增广，在 **Phase 1、Phase 2、独立评测与推理** 命令中均添加：
+
+```bash
+--receiver-ids 0,1
+```
+
+此时 CAV 0 和 CAV 1 各自轮流作为 receiver：对每个 receiver，其他 CAV 点云先变换到该 receiver 坐标系，receiver 本身始终位于 source slot 0，online query state 以 `(scene, receiver)` 独立重置。它会增加 receiver-centric clips；必须从 Phase 1 重新训练，并以同一 receiver 协议训练/评测，不能把旧的 `[0]` checkpoint 结果与 `[0,1]` 结果混报。`--resume` 会因配置 hash 不同拒绝跨协议恢复。
+
 ## 1. 依赖预检
 
 首次运行或 Python/PyTorch/CUDA 变化后编译固定 MOTR deformable-attention：

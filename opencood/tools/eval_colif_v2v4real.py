@@ -16,6 +16,7 @@ from opencood.tools.colif.eval_utils import (
     build_colif_evaluation_loader,
     evaluate_colif_strict_online,
 )
+from opencood.tools.colif.receiver_protocol import apply_receiver_override
 
 
 def _arguments():
@@ -25,6 +26,10 @@ def _arguments():
     parser.add_argument("--split", choices=("test",), default="test")
     parser.add_argument("--output", required=True)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument(
+        "--receiver-ids",
+        help="Comma-separated CAV IDs; use 0 for one ego or 0,1 for CMP-style multi-ego",
+    )
     parser.add_argument("--max-frames-per-rank", type=int)
     parser.add_argument(
         "--force-measurement-gain",
@@ -96,6 +101,7 @@ def main():
     # Non-parameter runtime semantics (thresholds, clocks, TTL) are part of
     # the checkpoint contract and must not silently revert to another YAML.
     hypes = payload.get("config", requested_hypes)
+    receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
     forecast_config = hypes["model"]["args"]["forecast"]
     if args.diagnostic_min_forecast_history is not None:
         forecast_config["min_forecast_history_steps"] = int(
@@ -173,6 +179,7 @@ def main():
         "checkpoint_epoch": payload.get("epoch"),
         "checkpoint_global_step": payload.get("global_step"),
         "world_size": world_size,
+        "receiver_ids": list(receiver_ids),
         "max_frames_per_rank": args.max_frames_per_rank,
         "diagnostic_force_measurement_gain": args.force_measurement_gain,
         "diagnostic_future_feedback_disabled": bool(

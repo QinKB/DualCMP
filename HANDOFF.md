@@ -1,5 +1,12 @@
 # HANDOFF
 
+## 2026-08-14 CMP multi-ego receiver 接口与恢复点
+
+- 已创建当前 CoLIF 主仓库恢复点：`5e3477a checkpoint: current CoLIF implementation`。训练日志/checkpoint（约194 GB）和`.serena/`索引没有提交；MOTR 外部依赖的两处本地兼容修复位于其独立仓库提交`cbdde0c fix: support batched CoLIF queries`，未推送。
+- 已逐段复核 CMP `IntermediateFusionDatasetMultiEgo`：它对每个scene的每个`ego_cav_id`建立独立记录，其他CAV根据该ego坐标变换点云；CoLIF 的`ColifSequenceDataset`已同构地为`(scene_id, receiver_id)`构建clip，`_source_ids_for_receiver`保证当前receiver位于source slot 0，`SceneReceiverDistributedSampler`和runtime state使用`(scene, receiver)`边界。因此不向`PointPillarColif`增加receiver-ID embedding、第二个FuseBEVT或第二套query bank。
+- 新增`opencood/tools/colif/receiver_protocol.py`：三个入口共享`--receiver-ids`（例如`0`或`0,1`），在dataset构建前覆盖`fusion.args.receiver_ids`；训练日志、strict-online metrics JSON与GT-free runtime artifact都会记录最终列表。默认YAML仍是`[0]`，而`[0,1]`必须从Phase 1重新训练并与同协议评测，`--resume`继续通过既有config hash拒绝跨协议恢复。
+- 回归：新增receiver协议/slot-0测试；完整`tests/colif`为`121 passed`（19个已知warning），相关入口`compileall`通过，`git diff --check`通过。真实V2V4Real单卡Phase-1一批`--receiver-ids 0,1 --smoke-batches 1 --no-eval`完成：dataset records=`3420`（先前receiver-0 protocol的1710的两倍）、`receiver_ids=[0,1]`写入log、forward/backward/optimizer成功、未用可训练参数0、runtime GT guard保持启用。该随机初始化单批仅验证通路，不是性能实验。
+
 ## 2026-08-13 最终固定种子消融、双预测分支与当前主张（当前最新）
 
 - 当前论文主张已从被否证的“future improves tracking”切换为：**面向 current detection/tracking 的单一 dense fused BEV 不必然是 motion forecasting 的充分融合；CoLIF 保留 CMP FuseBEVT 测量路径，同时让 persistent actor query 从 receiver-aligned per-source BEV 中选择预测相关证据。** forecast不再反馈 tracking，主模式固定为`future_prior_mode=none`。

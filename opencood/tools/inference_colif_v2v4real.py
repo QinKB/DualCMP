@@ -14,6 +14,7 @@ from opencood.data_utils.v2v4real.datasets.colif_schema import (
 )
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.tools import train_utils
+from opencood.tools.colif.receiver_protocol import apply_receiver_override
 
 
 def _arguments():
@@ -24,6 +25,10 @@ def _arguments():
     parser.add_argument("--split", choices=("test",), default="test")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--max-frames", type=int)
+    parser.add_argument(
+        "--receiver-ids",
+        help="Comma-separated CAV IDs; use 0 for one ego or 0,1 for CMP-style multi-ego",
+    )
     return parser.parse_args()
 
 
@@ -33,6 +38,7 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location="cpu")
     # Reuse checkpoint runtime semantics such as thresholds and lifecycle TTL.
     hypes = checkpoint.get("config", requested_hypes)
+    receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
     fusion_args = hypes["fusion"]["args"]
     fusion_args["runtime_only"] = True
     fusion_args["warmup_length"] = 0
@@ -86,6 +92,7 @@ def main():
             "format": "colif_runtime_v1",
             "checkpoint": str(Path(args.checkpoint).resolve()),
             "split": args.split,
+            "receiver_ids": list(receiver_ids),
             "records": records,
         },
         output,
