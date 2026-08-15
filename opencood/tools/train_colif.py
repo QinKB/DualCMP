@@ -32,6 +32,7 @@ from opencood.tools.colif_train_utils import (
     set_colif_train_mode,
 )
 from opencood.tools.colif.eval_utils import (
+    FORECAST_METRIC_PROTOCOLS,
     build_colif_evaluation_loader,
     evaluate_colif_strict_online,
 )
@@ -69,6 +70,16 @@ def _arguments():
         help="CMP-compatible protocol: evaluate the official test split only",
     )
     parser.add_argument("--eval-workers", type=int, default=2)
+    parser.add_argument(
+        "--forecast-metric-protocol",
+        choices=FORECAST_METRIC_PROTOCOLS,
+        default="online_masked",
+        help=(
+            "online_masked preserves variable-validity online metrics; "
+            "cmp_fixed reports corrected fixed 1/3/5 s metrics using FDE "
+            "indices 9/29/49 and complete 5 s targets"
+        ),
+    )
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--disable-actor-cooperative-fusion", action="store_true")
     parser.add_argument("--disable-temporal-history", action="store_true")
@@ -720,6 +731,7 @@ def main() -> None:
                         "max_center_distance", 12.0
                     )
                 ),
+                forecast_metric_protocol=args.forecast_metric_protocol,
             )
             evaluation_metrics.update({
                 "split": args.eval_split,

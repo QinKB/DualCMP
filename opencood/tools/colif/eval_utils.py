@@ -14,6 +14,9 @@ from opencood.data_utils.v2v4real.datasets import build_v2v4real_dataset
 from opencood.tools import train_utils
 
 
+FORECAST_METRIC_PROTOCOLS = ("online_masked", "cmp_fixed")
+
+
 class SceneReceiverDistributedSampler(Sampler):
     """Shard complete receiver timelines and retain chronological order."""
 
@@ -98,6 +101,40 @@ def _absolute_forecast_error(
     return torch.norm(
         predicted_absolute - target_absolute.unsqueeze(0), dim=-1
     )
+
+
+def _forecast_metric_window(
+    mask_full: torch.Tensor,
+    horizon: int,
+    max_horizon: int,
+    protocol: str,
+) -> tuple[torch.Tensor, int] | None:
+    """Return the ADE mask and zero-based FDE endpoint for one horizon.
+
+    Future index zero is the first frame after the current observation.  At
+    10 Hz, fixed 1/3/5 s endpoints are therefore indices 9/29/49.
+    """
+
+    if protocol not in FORECAST_METRIC_PROTOCOLS:
+        raise ValueError(
+            "Unknown forecast metric protocol %r; expected one of %s"
+            % (protocol, FORECAST_METRIC_PROTOCOLS)
+        )
+    if mask_full.ndim != 1:
+        raise ValueError("future validity mask must be one-dimensional")
+    if horizon <= 0 or max_horizon < horizon:
+        raise ValueError("forecast horizons must be positive and ordered")
+    if protocol == "cmp_fixed":
+        if mask_full.numel() < max_horizon:
+            return None
+        if not bool(mask_full[:max_horizon].all()):
+            return None
+        return mask_full[:horizon], horizon - 1
+
+    mask = mask_full[:horizon]
+    if not bool(mask.any()):
+        return None
+    return mask, int(torch.where(mask)[0][-1])
 
 
 def _history_velocity_estimates(
@@ -250,9 +287,23 @@ def evaluate_colif_strict_online(
     max_frames=None,
     progress_interval=100,
     diagnostic_residual_prototypes=None,
+    forecast_metric_protocol="online_masked",
 ):
     """Evaluate only after a supervision-free forward at every receiver time."""
 
+    horizons = tuple(int(horizon) for horizon in horizons)
+    if not horizons or any(horizon <= 0 for horizon in horizons):
+        raise ValueError("horizons must contain positive frame counts")
+    if tuple(sorted(horizons)) != horizons or len(set(horizons)) != len(horizons):
+        raise ValueError("horizons must be strictly ordered")
+    if forecast_metric_protocol not in FORECAST_METRIC_PROTOCOLS:
+        raise ValueError(
+            "Unknown forecast metric protocol %r; expected one of %s"
+            % (forecast_metric_protocol, FORECAST_METRIC_PROTOCOLS)
+        )
+    if forecast_metric_protocol == "cmp_fixed" and horizons != (10, 30, 50):
+        raise ValueError("cmp_fixed requires horizons=(10, 30, 50)")
+    longest_horizon = max(horizons)
     was_training = model.training
     model.eval()
     fields_per_horizon = 3 + len(miss_thresholds)
@@ -510,10 +561,15 @@ def evaluate_colif_strict_online(
                     ),
                 )
                 for horizon_index, horizon in enumerate(horizons):
-                    mask = mask_full[:horizon]
-                    if not mask.any():
+                    metric_window = _forecast_metric_window(
+                        mask_full,
+                        horizon,
+                        longest_horizon,
+                        forecast_metric_protocol,
+                    )
+                    if metric_window is None:
                         continue
-                    last_valid = int(torch.where(mask)[0][-1])
+                    mask, last_valid = metric_window
                     diagnostic_offset = (
                         diagnostic_base
                         + horizon_index * diagnostic_fields_per_horizon
@@ -582,13 +638,42 @@ def evaluate_colif_strict_online(
                 actor_id = int(targets["actor_ids"][0, target_index])
                 lifecycle["first_forecast"].setdefault(actor_id, frame_number)
                 lifecycle["forecast_frames"][actor_id] += 1
+
+            metric_forecast_matches = forecast_matches
+            if forecast_metric_protocol == "cmp_fixed":
+                if targets["future_mask"].shape[-1] >= longest_horizon:
+                    complete_future = targets["future_mask"][
+                        0, :, :longest_horizon
+                    ].all(dim=-1)
+                else:
+                    complete_future = torch.zeros_like(
+                        targets["current_mask"][0]
+                    )
+                metric_forecast_targets = torch.where(
+                    targets["current_mask"][0] & complete_future
+                )[0]
+                metric_forecast_matches = _hungarian_matches(
+                    outputs["track_boxes"][0, :, :2],
+                    targets["current_boxes"][0, :, :2],
+                    forecast_queries,
+                    metric_forecast_targets,
+                    match_distance,
+                )
+
+            for query_index, target_index in metric_forecast_matches:
                 prediction = outputs["pred_trajs"][0, query_index, :, :, :2].float()
                 target = targets["future_xy"][0, target_index].float()
                 mask_full = targets["future_mask"][0, target_index]
                 for horizon_index, horizon in enumerate(horizons):
-                    mask = mask_full[:horizon]
-                    if not mask.any():
+                    metric_window = _forecast_metric_window(
+                        mask_full,
+                        horizon,
+                        longest_horizon,
+                        forecast_metric_protocol,
+                    )
+                    if metric_window is None:
                         continue
+                    mask, last_valid = metric_window
                     errors = _absolute_forecast_error(
                         prediction[:, :horizon],
                         outputs["track_boxes"][0, query_index, :2].float(),
@@ -598,7 +683,6 @@ def evaluate_colif_strict_online(
                     mode_ade = (
                         errors * mask[None].to(errors.dtype)
                     ).sum(-1) / mask.sum()
-                    last_valid = int(torch.where(mask)[0][-1])
                     min_ade = mode_ade.min()
                     min_fde = errors[:, last_valid].min()
                     offset = horizon_index * fields_per_horizon
@@ -612,9 +696,14 @@ def evaluate_colif_strict_online(
                 age_tensor = outputs.get("query_age")
                 age = int(age_tensor[0, query_index]) if age_tensor is not None else 1
                 age_bucket = 0 if age <= 1 else (1 if age <= 3 else 2)
-                longest_horizon = max(horizons)
-                age_mask = mask_full[:longest_horizon]
-                if age_mask.any():
+                age_window = _forecast_metric_window(
+                    mask_full,
+                    longest_horizon,
+                    longest_horizon,
+                    forecast_metric_protocol,
+                )
+                if age_window is not None:
+                    age_mask, age_last_valid = age_window
                     age_errors = _absolute_forecast_error(
                         prediction[:, :longest_horizon],
                         outputs["track_boxes"][0, query_index, :2].float(),
@@ -624,7 +713,6 @@ def evaluate_colif_strict_online(
                     age_mode_ade = (
                         age_errors * age_mask[None].to(age_errors.dtype)
                     ).sum(-1) / age_mask.sum()
-                    age_last_valid = int(torch.where(age_mask)[0][-1])
                     age_offset = age_base + age_bucket * 3
                     statistics[age_offset] += age_mode_ade.min().double()
                     statistics[age_offset + 1] += age_errors[
@@ -730,6 +818,27 @@ def evaluate_colif_strict_online(
             "ego_never_observed_forecasted_actor_count": int(statistics[base + 17]),
             "strict_online": True,
             "runtime_uses_ground_truth": False,
+            "forecast_metric_protocol": forecast_metric_protocol,
+            "forecast_sample_period_s": 0.1,
+            "forecast_horizon_steps": {
+                "%.0fs" % (horizon / 10.0): horizon for horizon in horizons
+            },
+            "forecast_fde_indices": (
+                {
+                    "%.0fs" % (horizon / 10.0): horizon - 1
+                    for horizon in horizons
+                }
+                if forecast_metric_protocol == "cmp_fixed"
+                else None
+            ),
+            "forecast_fde_endpoint_rule": (
+                "fixed_horizon_minus_one"
+                if forecast_metric_protocol == "cmp_fixed"
+                else "last_valid_within_horizon"
+            ),
+            "forecast_requires_complete_future": (
+                forecast_metric_protocol == "cmp_fixed"
+            ),
         }
     )
     for bucket_index, bucket_name in enumerate(age_bucket_names):

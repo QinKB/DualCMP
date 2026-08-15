@@ -13,6 +13,7 @@ import torch.distributed as dist
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.tools import train_utils
 from opencood.tools.colif.eval_utils import (
+    FORECAST_METRIC_PROTOCOLS,
     build_colif_evaluation_loader,
     evaluate_colif_strict_online,
 )
@@ -31,6 +32,16 @@ def _arguments():
         help="Comma-separated CAV IDs; use 0 for one ego or 0,1 for CMP-style multi-ego",
     )
     parser.add_argument("--max-frames-per-rank", type=int)
+    parser.add_argument(
+        "--forecast-metric-protocol",
+        choices=FORECAST_METRIC_PROTOCOLS,
+        default="online_masked",
+        help=(
+            "online_masked preserves variable-validity online metrics; "
+            "cmp_fixed reports corrected fixed 1/3/5 s metrics using FDE "
+            "indices 9/29/49 and complete 5 s targets"
+        ),
+    )
     parser.add_argument(
         "--force-measurement-gain",
         type=float,
@@ -172,6 +183,7 @@ def main():
         ),
         max_frames=args.max_frames_per_rank,
         diagnostic_residual_prototypes=diagnostic_residual_prototypes,
+        forecast_metric_protocol=args.forecast_metric_protocol,
     )
     metrics.update({
         "split": args.split,

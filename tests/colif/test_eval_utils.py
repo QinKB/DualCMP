@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from opencood.tools.colif.eval_utils import (
@@ -182,3 +183,130 @@ def test_strict_online_reports_partner_only_short_history_forecast() -> None:
     assert metrics["partner_only_minFDE_5s"] == 0.0
     assert metrics["partner_only_age_2_3_actor_count_5s"] == 1
     assert metrics["partner_only_age_2_3_minFDE_5s"] == 0.0
+
+
+class _ZeroForecastModel(torch.nn.Module):
+    def forward(self, runtime, state=None):
+        trajectory = torch.zeros(1, 1, 2, 50, 5)
+        outputs = {
+            "active_mask": torch.tensor([[True]]),
+            "forecast_valid_mask": torch.tensor([[True]]),
+            "track_boxes": torch.zeros(1, 1, 7),
+            "runtime_ids": torch.tensor([[0]]),
+            "pred_trajs": trajectory,
+        }
+        return outputs, object(), {}
+
+
+def _single_actor_metric_batch(future_mask: torch.Tensor) -> dict:
+    future = torch.zeros(1, 1, 50, 2)
+    future[0, 0, :, 0] = torch.arange(1, 51, dtype=torch.float32)
+    return {
+        "scene_receiver_keys": [("scene", 0)],
+        "runtime_frames": [{"receiver_frame_idx": torch.tensor([0])}],
+        "target_frames": [{
+            "current_mask": torch.tensor([[True]]),
+            "actor_ids": torch.tensor([[7]]),
+            "current_boxes": torch.zeros(1, 1, 7),
+            "evidence_source_bits": torch.tensor([[1]]),
+            "future_mask": future_mask.view(1, 1, 50),
+            "future_xy": future,
+        }],
+    }
+
+
+def test_cmp_fixed_protocol_uses_correct_10hz_endpoints() -> None:
+    metrics = evaluate_colif_strict_online(
+        _ZeroForecastModel(),
+        [_single_actor_metric_batch(torch.ones(50, dtype=torch.bool))],
+        torch.device("cpu"),
+        forecast_metric_protocol="cmp_fixed",
+    )
+
+    assert metrics["minADE_1s"] == pytest.approx(5.5)
+    assert metrics["minFDE_1s"] == pytest.approx(10.0)
+    assert metrics["minADE_3s"] == pytest.approx(15.5)
+    assert metrics["minFDE_3s"] == pytest.approx(30.0)
+    assert metrics["minADE_5s"] == pytest.approx(25.5)
+    assert metrics["minFDE_5s"] == pytest.approx(50.0)
+    assert metrics["actor_count_1s"] == 1
+    assert metrics["actor_count_3s"] == 1
+    assert metrics["actor_count_5s"] == 1
+    assert metrics["forecast_metric_protocol"] == "cmp_fixed"
+    assert metrics["forecast_fde_indices"] == {
+        "1s": 9,
+        "3s": 29,
+        "5s": 49,
+    }
+    assert metrics["forecast_requires_complete_future"] is True
+
+
+def test_cmp_fixed_excludes_truncated_future_but_online_masked_preserves_it() -> None:
+    future_mask = torch.zeros(50, dtype=torch.bool)
+    future_mask[:8] = True
+    batch = _single_actor_metric_batch(future_mask)
+
+    online_metrics = evaluate_colif_strict_online(
+        _ZeroForecastModel(),
+        [batch],
+        torch.device("cpu"),
+        forecast_metric_protocol="online_masked",
+    )
+    fixed_metrics = evaluate_colif_strict_online(
+        _ZeroForecastModel(),
+        [batch],
+        torch.device("cpu"),
+        forecast_metric_protocol="cmp_fixed",
+    )
+
+    assert online_metrics["actor_count_1s"] == 1
+    assert online_metrics["actor_count_3s"] == 1
+    assert online_metrics["actor_count_5s"] == 1
+    assert online_metrics["minFDE_1s"] == pytest.approx(8.0)
+    assert online_metrics["minFDE_3s"] == pytest.approx(8.0)
+    assert online_metrics["minFDE_5s"] == pytest.approx(8.0)
+    assert online_metrics["forecast_fde_indices"] is None
+    assert (
+        online_metrics["forecast_fde_endpoint_rule"]
+        == "last_valid_within_horizon"
+    )
+    assert fixed_metrics["actor_count_1s"] == 0
+    assert fixed_metrics["actor_count_3s"] == 0
+    assert fixed_metrics["actor_count_5s"] == 0
+    # The protocol changes forecast displacement eligibility, not online
+    # matching or forecast coverage bookkeeping.
+    assert online_metrics["forecast_coverage"] == 1.0
+    assert fixed_metrics["forecast_coverage"] == 1.0
+
+
+def test_cmp_fixed_matches_only_the_complete_future_population() -> None:
+    batch = _single_actor_metric_batch(torch.ones(50, dtype=torch.bool))
+    targets = batch["target_frames"][0]
+    targets["current_mask"] = torch.tensor([[True, True]])
+    targets["actor_ids"] = torch.tensor([[7, 8]])
+    targets["current_boxes"] = torch.zeros(1, 2, 7)
+    targets["current_boxes"][0, 1, 0] = 0.1
+    targets["evidence_source_bits"] = torch.tensor([[1, 1]])
+    targets["future_mask"] = torch.ones(1, 2, 50, dtype=torch.bool)
+    targets["future_mask"][0, 0, 8:] = False
+    targets["future_xy"] = torch.zeros(1, 2, 50, 2)
+    targets["future_xy"][0, 1, :, 0] = torch.arange(
+        1, 51, dtype=torch.float32
+    )
+
+    metrics = evaluate_colif_strict_online(
+        _ZeroForecastModel(),
+        [batch],
+        torch.device("cpu"),
+        forecast_metric_protocol="cmp_fixed",
+    )
+
+    # The closer but truncated target must not steal the only runtime query
+    # from the complete-future CMP metric population.
+    assert metrics["actor_count_1s"] == 1
+    assert metrics["actor_count_3s"] == 1
+    assert metrics["actor_count_5s"] == 1
+    assert metrics["minFDE_5s"] == pytest.approx(50.1)
+    # Coverage deliberately remains defined over all online forecast targets.
+    assert metrics["target_actor_frames"] == 2
+    assert metrics["matched_actor_frames"] == 1
