@@ -1,250 +1,242 @@
-# CoLIF: Task-Adaptive Fusion for Persistent Cooperative Motion Forecasting
+# DualCMP: Task-Adaptive Cooperative Motion Prediction with Fused and Source-Specific BEV Representations
 
-> **Working manuscript, 2026-08-13.** This draft follows the verified implementation and frozen one-epoch ablations in `/home/qkb/Project/CoLIF`. BibTeX keys are temporary. Claims about the optional trajectory-source refiner are deliberately separated from claims supported by the default model.
+> **Working manuscript, 2026-08-18.** This draft follows the verified implementation and controlled ablations in `/home/qkb/Project/CoLIF`. BibTeX keys are temporary. The manuscript distinguishes the default agent-specific feature aggregation from the optional trajectory-conditioned refinement branch.
+
+## Abstract
+
+Predicting the future motion of surrounding agents is essential for safe autonomous driving. Vehicle-to-everything communication improves scene understanding by sharing observations from spatially separated connected and automated vehicles (CAVs). Existing cooperative predictors mainly fuse BEV features for perception or associate tracked trajectories before forecasting. These pipelines improve scene understanding and historical motion representation, respectively. Motion prediction, however, often relies on agent-specific spatial context, and the informative viewpoint may vary across agents because of sensing range and occlusion. We propose **DualCMP**, a task-adaptive cooperative motion prediction framework with fused and source-specific BEV representations. DualCMP uses the same LiDAR encoding in two ways: fused BEV features update persistent agent queries, while each query aggregates local features from the aligned CAV feature maps. A motion-anchored decoder integrates the cooperative context with motion history and agent interactions to generate multimodal trajectories. Experiments on the real-world V2V4Real dataset demonstrate that DualCMP achieves state-of-the-art performance in cooperative motion prediction.
 
 ## I. Introduction
 
-Accurate motion forecasting is required for an automated vehicle to plan safely around interacting traffic. The difficulty is not limited to extrapolating an actor's kinematics: the predictor must estimate several plausible futures from partial observations while the sensing platform, neighboring actors, and visibility conditions continue to change. Cooperative sensing expands the evidence available to the receiver by combining LiDAR observations from spatially separated connected vehicles, thereby extending the effective field of view beyond that of a single vehicle \cite{xu2023v2v4real}. The central question for cooperative motion prediction is therefore not only whether communication improves current perception, but also whether the shared evidence is represented in a form that is useful for predicting how each actor will move.
+Autonomous vehicles rely on motion prediction to anticipate surrounding traffic and plan safe maneuvers. Motion predictors commonly represent multiple plausible futures using observed agent motion, interactions, and local scene context \cite{zhou2022hivt,zhou2023qcnet}. The quality of these inputs depends on sensing conditions. Occlusion, sparse LiDAR returns, and finite sensing range can leave an agent partially observed or omit nearby traffic relevant to its future motion. Vehicle-to-everything communication provides spatially separated observations from nearby connected and automated vehicles (CAVs), extending the scene information available to perception and forecasting \cite{xu2023v2v4real,wang2020v2vnet}. These complementary viewpoints can improve scene coverage and expand the context available for motion prediction.
 
-Existing systems answer this question at different levels of the autonomy stack. CMP first fuses multi-vehicle bird's-eye-view (BEV) features for detection, constructs histories with a multi-object tracker, predicts trajectories at each vehicle, and then aggregates the resulting predictions \cite{wang2025cmp}. End-to-end systems such as V2XPnP instead perform spatio-temporal feature fusion and jointly decode perception and prediction outputs \cite{zhou2025v2xpnp}. More recent multi-level cooperative architectures further argue that perception, prediction, and planning impose heterogeneous demands on a shared representation and introduce task-specialized or prediction-level fusion \cite{souig2026unimm}. These developments show that cooperative prediction does not universally require a finalized tracking interface. They also expose a more precise design issue: the representation that is effective for estimating the current scene need not be the most informative representation for forecasting individual actors.
+Cooperative motion prediction leverages observations from different viewpoints, whose relevance may vary across target agents and traffic situations. At an occluded intersection, for example, one CAV may obtain a clearer observation of an approaching vehicle, while another observes neighboring agents that may influence its future motion. The former may support estimation of the target's current state, whereas the latter provides interaction and local scene context. For another target in the same scene, the roles of the two viewpoints may be different \cite{wang2020v2vnet,ruan2024v2xgraph}. This variation is particularly relevant to motion forecasting, where predictions are formed for individual agents. Motion history, neighboring agents, and local context are typically organized relative to the target being forecast \cite{zhou2022hivt,zhou2023qcnet}. A scene-level fusion can support a common estimate of current traffic, but it does not by itself specify which parts of the multi-view context should be used for each target. The information relevant to forecasting may therefore depend on the target's position, heading, and surrounding interactions.
 
-Intermediate cooperative perception commonly aligns source features and compresses them into one receiver-centric BEV. This operation is well suited to current object localization because it aggregates complementary evidence into a unified spatial measurement. Once fused, however, the downstream forecaster is not explicitly given the evidence supplied by each source around a particular actor. That distinction can matter because detection and forecasting ask different questions. Detection estimates whether an object occupies a location now, whereas forecasting also uses actor-centered motion history, interaction context, viewing geometry, and local scene evidence relevant to alternative motions. Applying one global fusion result to both tasks therefore couples two different information-selection problems. The limitation is not that fused BEV is intrinsically unsuitable for prediction; rather, a single task-shared fusion operator provides no mechanism for the forecaster to reweight aligned source evidence separately for each actor.
+Current cooperative forecasting systems provide multi-vehicle information to the predictor as fused features, associated trajectories, or shared predictions. Intermediate-fusion methods align and combine CAV features before detection and tracking, producing a receiver-centric scene representation for agent-state estimation \cite{wang2025cmp,zhou2025v2xpnp}. Trajectory-based methods instead associate motion histories generated by separate perception streams, retaining historical state information from multiple views after tracking \cite{yu2023v2xseq,ruan2024v2xgraph}. Prediction-level methods further exchange forecast hypotheses or motion queries, extending cooperation to the forecasting stage \cite{wang2025cmp,souig2026unimm,madjid2026latefusion}. These representations support scene estimation, historical motion modeling, and cross-view prediction aggregation, respectively. Feature fusion occurs before target states are established, while trajectory and prediction fusion operate after observations have been converted into state sequences or local forecasts. As shown in Fig. 1, aligned CAV feature maps are available before state estimation, whereas the position and heading used to organize agent-centric context become available after the agent state has been established. Retaining the aligned maps until this stage would allow multi-view spatial context to be organized around each target agent without replacing the fused scene representation.
 
-This observation motivates a task-adaptive cooperative interface. The perception path should retain dense multi-view fusion because it provides reliable receiver-centric measurements for detection and tracking. In parallel, the forecasting path should retain the aligned source BEVs long enough for each persistent actor state to query the evidence most relevant to its own geometry and motion. Such a design preserves a single receiver-side actor identity and avoids constructing independent per-vehicle tracks, while allowing perception and prediction to aggregate the same encoded LiDAR features differently. It also follows the broader motion-prediction lesson that local evidence, temporal evolution, and actor interaction should be modeled at their appropriate scales \cite{zhou2022hivt}, and that candidate trajectories can serve as queries for targeted context retrieval \cite{zhou2023qcnet}.
+![DualCMP introduction figure](figures/dualcmp_introduction_fig1_v3.png)
 
-We instantiate this principle in **CoLIF**, a strict-online cooperative motion forecasting framework. Receiver-aligned source point clouds are encoded once by the CMP PointPillar backbone. The original FuseBEVT branch produces the fused BEV and dense detection heatmap used by a persistent query tracker. A parallel prediction branch samples a small patch from every valid source BEV around each active actor and uses actor-to-sensor relative geometry to aggregate these patches without relying on a fixed source index. The resulting cooperative actor context is combined with an ordered, variable-length history and neighboring actor states to produce six Gaussian trajectory modes over five seconds. Because one position observation cannot identify velocity, a query is created at the first supported measurement but becomes forecast-eligible after two causal observations. Forecast outputs do not feed back into tracking: experiments with future-conditioned association, propagation, and query updates did not improve the current implementation, so identity and current-state estimation depend only on current fused measurements and a causal constant-velocity state.
+*Fig. 1. Cooperative information fusion for motion prediction. (a) Intermediate fusion aggregates aligned CAV BEV features before agent-state estimation and forecasting. (b) Trajectory fusion associates and fuses histories generated by separate detection and tracking pipelines before forecasting. (c) DualCMP uses fused BEV features to update persistent agent queries and aggregates aligned CAV feature maps for agent-centric motion prediction.*
 
-CoLIF retains two forecast outputs for different accuracy--capacity choices. The default output is an actor-source motion proposal whose modes are residuals around robust causal velocity anchors. A higher-capacity trajectory-source refiner additionally treats every mode--time pair as a state query, samples current aligned source features along each proposed trajectory, and predicts a bounded residual to the proposal. The refiner is initialized as an exact identity mapping so that enabling it cannot randomly replace a valid proposal before learning. This branch is retained as a controlled research variant, not assumed to be superior: on the frozen V2V4Real test protocol it improves over removing source evidence, but its overall displacement errors remain above those of the simpler actor-source proposal.
+We propose **DualCMP**, a task-adaptive cooperative motion prediction framework that retains a fused BEV together with the aligned CAV feature maps produced by a shared LiDAR encoder. FuseBEVT first aggregates the aligned feature maps into the fused BEV, which updates persistent agent queries. For each active query, local features from the CAV maps are combined with relative CAV-agent geometry and aggregated to form cooperative spatial context. Rather than assigning a fixed identity to each CAV slot, the aggregation uses relative position, distance, bearing, and heading to represent the relationship between an agent and each viewpoint. A motion-anchored decoder integrates this context with ordered motion history and agent interactions to generate multimodal trajectories. We evaluate DualCMP on the real-world V2V4Real dataset. To isolate the effect of the forecasting representation, the controlled ablations use fixed tracking results, agent sets, and forecast coverage. Results show that aligned CAV feature maps and ordered motion history yield lower trajectory errors than the corresponding variants.
 
-The current experiments isolate the proposed information paths by loading the same persistent-query tracker, freezing it during forecasting training, and using identical data order and actor sets for every ablation. On 1,993 strict-online V2V4Real test frames, the default model attains minADE/minFDE of 0.9997/1.3708 m at 1 s, 1.8472/2.9177 m at 3 s, and 2.5870/4.3804 m at 5 s, with forecast coverage of 0.7894. Relative to the otherwise identical model without actor-conditioned source fusion, it reduces minFDE by 12.96% at 1 s and 5.56% at 3 s, while the 5-s endpoint improvement is only 0.40%. The evidence therefore supports improved short- and mid-horizon cooperative forecasting and lower average error over the full horizon; it does not support a claim of substantial 5-s endpoint improvement from the new fusion module alone.
+The main contributions are summarized as follows:
 
-The main contributions are as follows:
+1. We present a receiver-side LiDAR cooperative motion prediction framework that maintains persistent agent queries from fused BEV measurements and uses the resulting online states for forecasting rather than taking precomputed tracking trajectories as input.
 
-1. We formulate cooperative perception and cooperative forecasting as related but non-identical fusion problems, and introduce a dual-path interface that preserves CMP-style dense fused-BEV measurements for persistent tracking while exposing aligned per-source BEV evidence to the actor-level predictor.
+2. We develop agent-specific CAV feature aggregation that conditions local BEV features on the current agent query and relative CAV-agent geometry. This design allows fused state estimation and multi-view forecasting context to share one LiDAR encoder without constructing separate tracks for each CAV.
 
-2. We develop a geometry-conditioned actor-source forecasting module that combines source-invariant local evidence, ordered variable-length actor history, and multi-actor interaction with multimodal motion anchors. Controlled ablations with identical tracker outputs demonstrate the separate contributions of source evidence and temporal ordering.
+3. We design a motion-anchored trajectory decoder that combines cooperative spatial context with ordered motion history and agent interactions. Fixed-tracking ablations on V2V4Real isolate the contributions of aligned CAV features and temporal encoding while jointly reporting tracking, forecast coverage, and trajectory accuracy.
 
-3. We provide an optional identity-initialized trajectory-source state refiner and a strict-online evaluation protocol covering displacement error, miss rate, forecast coverage, actor age, and source-support subsets. The results establish where the additional refiner helps and, equally importantly, where its added capacity does not outperform the simpler proposal.
-
-The remainder of this paper is organized as follows. Section II positions CoLIF relative to cooperative fusion and motion-prediction models. Section III defines the online task and presents the method. Section IV records the current experimental evidence and its claim boundaries.
+The remainder of this paper is organized as follows. Section II reviews related work. Section III defines the cooperative motion prediction problem, Section IV presents DualCMP, and Section V reports the experimental results.
 
 ## II. Related Work
 
 ### A. Cooperative Perception and Prediction
 
-Cooperative perception methods exchange raw observations, object outputs, or intermediate features to improve receiver-side scene understanding. Intermediate fusion balances spatial context and communication cost and is the perception backbone used by CMP \cite{wang2025cmp}. CMP extends cooperative perception to motion prediction through a modular detection--tracking--prediction pipeline and a second exchange of predicted trajectories. V2XPnP studies one-step spatio-temporal fusion for end-to-end multi-agent perception and prediction \cite{zhou2025v2xpnp}, while UniMM-V2X uses both perception-level and prediction-level cooperation and task-specialized representations for downstream tasks \cite{souig2026unimm}. CoLIF is narrower than an end-to-end planning stack: it studies how one LiDAR encoding can support dense current-state fusion and actor-conditioned forecasting without forcing both tasks to consume the same fused representation.
+Cooperative perception methods exchange raw observations, object outputs, or intermediate features to improve receiver-side scene understanding. Intermediate fusion balances spatial context and communication cost and is the perception backbone used by CMP \cite{wang2025cmp}. CMP extends cooperative perception to motion prediction through a modular detection--tracking--prediction pipeline and a second exchange of predicted trajectories. V2XPnP studies one-step spatio-temporal fusion for end-to-end multi-agent perception and prediction \cite{zhou2025v2xpnp}, while UniMM-V2X uses perception-level and prediction-level cooperation with task-specialized representations \cite{souig2026unimm}.
 
-### B. Actor-Centric Motion Forecasting
+Trajectory-level methods instead start from historical trajectories produced by upstream perception and tracking. PP-VIC fuses vehicle and infrastructure trajectories with CBMOT before applying a trajectory predictor \cite{yu2023v2xseq}. V2X-Graph learns cross-view associations and fuses motion and interaction features \cite{ruan2024v2xgraph}; CoPAD combines Hungarian matching with Kalman filtering for multi-source trajectory fusion \cite{wu2025copad}; and Co-MTP performs trajectory fusion over history and future domains \cite{zhang2025comtp}. ViTraj further learns vehicle-side and infrastructure-side trajectory representations \cite{you2025vitraj}. Prediction aggregation provides a later form of cooperation in CMP and in recent late-fusion work \cite{wang2025cmp,madjid2026latefusion}. DualCMP retains intermediate fusion for persistent state estimation and reuses the aligned CAV feature maps for agent-centric motion prediction.
 
-Motion predictors commonly combine temporal actor states, local scene context, and social interaction. HiVT separates local context extraction from global actor interaction and uses relative geometric representations \cite{zhou2022hivt}. QCNet uses query-centric encoding and a proposal--refinement decoder in which proposed trajectories provide adaptive anchors for context retrieval \cite{zhou2023qcnet}. CoLIF adopts neither model directly: V2V4Real provides no HD map in the current setup, and CoLIF's inputs are online persistent-query states rather than ground-truth trajectory histories. We instead use their architectural principles to organize causal actor history, relative source geometry, actor interaction, and the optional proposal-conditioned source sampler.
+### B. Agent-Centric Motion Forecasting
+
+Motion predictors commonly combine temporal agent states, local scene context, and social interaction. HiVT separates local context extraction from global agent interaction and uses relative geometric representations \cite{zhou2022hivt}. QCNet uses query-centric encoding and a proposal--refinement decoder in which proposed trajectories provide adaptive anchors for context retrieval \cite{zhou2023qcnet}. DualCMP adopts neither model directly: V2V4Real provides no HD map in the current setup, and DualCMP inputs are online persistent-query states rather than ground-truth trajectory histories. We instead use their architectural principles to organize observed motion history, relative CAV geometry, agent interaction, and the optional proposal-conditioned feature sampler.
 
 ### C. Joint Tracking and Forecasting
 
-Persistent object queries have been used to connect detection, tracking, and forecasting in single-vehicle systems. Predicted motion can also support occlusion handling or subsequent perception in methods such as PF-Track and ForeSight \cite{pang2023pftrack,papais2025foresight}. These works prevent us from claiming that future-assisted tracking is new. More importantly, our own controlled tests did not validate that mechanism in the present fused-LiDAR setting. The submitted CoLIF design therefore uses persistent queries to maintain actor identity but keeps forecasting as a read-only consumer of the causal tracking state.
+Persistent object queries have been used to connect detection, tracking, and forecasting in single-vehicle systems. Predicted motion can also support occlusion handling or subsequent perception in methods such as PF-Track and ForeSight \cite{pang2023pftrack,papais2025foresight}. These works prevent us from claiming that future-assisted tracking is new. More importantly, our own controlled tests did not validate that mechanism in the present fused-LiDAR setting. DualCMP therefore uses persistent queries to maintain actor identity but keeps forecasting as a read-only consumer of the online tracking state.
 
-## III. Methodology
+## III. Problem Formulation
 
-### A. Online Cooperative Forecasting Problem
-
-At receiver frame (t), let \(\mathcal{S}_t\) be the set of available CAV sources and let \(\mathcal{P}_{s}^{t}\) be the LiDAR point cloud of source \(s\). V2V4Real provides discrete 10-Hz frame sequences rather than measured message-arrival timestamps; the main protocol is therefore synchronous, and any delay or source dropout experiment must be described as a simulated perturbation. Calibration and pose information define a transform \(\mathbf{T}_{s\rightarrow r}^{t}\) from source \(s\) to receiver \(r\). The runtime input is
+Consider a scene with \(N_t\) available CAVs at time step \(t\), and let \(r\in\{1,\ldots,N_t\}\) denote the receiver. We denote the LiDAR point cloud and pose of CAV \(j\) by \(\mathbf{L}_t^j\) and \(\boldsymbol{\xi}_t^j\), respectively. The relative transformation from CAV \(j\) to receiver \(r\) and the runtime input are
 
 \[
-\mathcal{X}_{r}^{t}=\left\{
-\mathcal{P}_{s}^{t},\mathbf{T}_{s\rightarrow r}^{t}
-\right\}_{s\in\mathcal{S}_t}.
+\mathbf{T}_{j\rightarrow r}^t
+=\left(\boldsymbol{\xi}_t^r\right)^{-1}\boldsymbol{\xi}_t^j,
+\qquad
+\mathcal{X}_r^t=
+\left(
+\left\{\mathbf{L}_t^j,\mathbf{T}_{j\rightarrow r}^t\right\}_{j=1}^{N_t},
+\boldsymbol{\xi}_t^r,\tau_t^r
+\right),
 \tag{1}
 \]
 
-Ground-truth boxes, actor identities, source-support labels, and future trajectories are excluded from \(\mathcal{X}_{r}^{t}\). They enter only the training criterion and evaluator. The model maintains a receiver-side state for at most \(Q\) query slots,
+where \(\tau_t^r\) is the receiver timestamp. Given \(\mathcal{X}_r^t\) and the state from the previous time step, the task is to estimate the current states of surrounding agents and predict their future trajectories in the receiver coordinate frame. Ground-truth boxes, identities, and future trajectories are used only for training and evaluation and are not included in \(\mathcal{X}_r^t\).
+
+## IV. Method
+
+### A. Method Overview
+
+DualCMP processes the receiver sequence chronologically and maintains a fixed set of persistent agent queries,
 
 \[
-\mathcal{B}^{t}=\left\{
-\mathbf{q}_{i}^{t},\mathbf{b}_{i}^{t},\mathbf{v}_{i}^{t},
-e_i^t,a_i^t,m_i^t,\mathcal{H}_{i}^{t}
+\mathcal{Q}_r^t=
+\left\{
+\mathbf{q}_i^t,\mathbf{b}_i^t,\mathbf{v}_i^t,
+e_i^t,\eta_i^t,d_i^t,\mathcal{H}_i^t
 \right\}_{i=1}^{Q},
 \tag{2}
 \]
 
-where \(\mathbf{q}\) is query content, \(\mathbf{b}\in\mathbb{R}^{7}\) is a 3-D box, \(\mathbf{v}\in\mathbb{R}^{2}\) is planar velocity, \(e\) is existence, \(a\) and \(m\) are age and missed-measurement counters, and \(\mathcal{H}\) is an ordered causal state history. Every forecast-eligible active query outputs \(K=6\) modes for \(H=50\) future steps.
+where \(\mathbf{q}_i^t\) is the query feature, \(\mathbf{b}_i^t\) and \(\mathbf{v}_i^t\) are the current 3-D box and planar velocity, \(e_i^t\) is the existence score, \(\eta_i^t\) and \(d_i^t\) record the query age and consecutive misses, and \(\mathcal{H}_i^t\) contains the available state history. The recurrent state also stores the receiver pose and timestamp used to transform the queries between consecutive receiver frames. Each active query represents one traffic agent rather than one CAV. Once an agent has two valid observations, the model predicts a multimodal distribution over its future positions.
 
-### B. Shared LiDAR Encoding and Dual Cooperative Paths
+DualCMP follows a dual-representation design. For each receiver frame, the LiDAR encoder first computes aligned CAV BEV feature maps. FuseBEVT aggregates these features into a fused BEV representation, which is used to update the current state and history of the persistent agent queries. The motion predictor also retrieves local features for each agent from the aligned CAV feature maps. The resulting cooperative context is combined with the query history and inter-agent interactions to predict multimodal future trajectories. The persistent query state connects tracking and forecasting, while forecast outputs do not update the tracking state.
 
-Following CMP, every source point cloud is first transformed into the current receiver coordinate frame and then voxelized. A shared PointPillar encoder \(E_\theta\), comprising PillarVFE, BEV scatter, backbone, shrink, and compression layers, produces aligned source features
+### B. Fused and Aligned CAV BEV Encoding
+
+Following CMP \cite{wang2025cmp}, each CAV point cloud is transformed to the receiver frame before voxelization. A weight-shared PointPillar encoder \(E_\theta\) maps the receiver-aligned point clouds to aligned CAV BEV features, which are regrouped with an availability mask and fused by FuseBEVT:
 
 \[
-\mathbf{F}_{s}^{t}=E_\theta
-\left(\mathbf{T}_{s\rightarrow r}^{t}\mathcal{P}_{s}^{t}\right),
+\mathbf{F}_j^t=E_\theta
+\left(\mathbf{T}_{j\rightarrow r}^t\mathbf{L}_t^j\right),
 \qquad
-\mathbf{F}^{t}\in\mathbb{R}^{B\times L\times C\times H_b\times W_b}.
+\mathbf{F}_{\mathrm{fuse}}^t=
+\operatorname{FuseBEVT}
+\left(\{\mathbf{F}_j^t\}_{j=1}^{N_t},\mathbf{m}^t\right).
 \tag{3}
 \]
 
-In the implemented V2V4Real configuration, \(C=256\), \(H_b=48\), \(W_b=128\), and at most \(L=2\) sources are present. These features enter two task-specific paths.
+The mask \(\mathbf{m}^t\) marks valid CAV features when samples are padded to a common batch shape. The model retains both outputs of (3). The fused feature \(\mathbf{F}_{\mathrm{fuse}}^t\) provides a receiver-centric scene representation for current-state estimation. The aligned features \(\{\mathbf{F}_j^t\}\) preserve the CAV dimension and are reused by the motion predictor after the agent queries have been updated. Both paths use the same PointPillar encoder; DualCMP does not introduce a second perception network. Dense classification and box-regression heads attached to \(\mathbf{F}_{\mathrm{fuse}}^t\) also provide current-frame measurement proposals for query tracking.
 
-The perception path preserves CMP's SwapFusionEncoder:
+### C. Persistent Query-Based Agent Tracking
+
+Before processing a new frame, the previous boxes are transformed to the current receiver frame and propagated with their estimated planar velocities. The dense heads decode a bounded set of current measurement proposals. Active queries are matched to these proposals by a distance-gated one-to-one assignment, and unmatched proposals initialize inactive query slots.
+
+The query features and reference boxes are updated from the fused BEV by a deformable-attention decoder following the persistent-query design used in online tracking \cite{gu2023vip3d}:
 
 \[
-\mathbf{F}_{\mathrm{fuse}}^{t}=
-\operatorname{FuseBEVT}\left(\{\mathbf{F}_{s}^{t}\},\mathbf{M}_{\mathrm{cav}}^{t}\right),
+(\widetilde{\mathbf{q}}_i^t,
+\widehat{\mathbf{b}}_i^t,
+\widehat{\mathbf{v}}_i^t,
+\widehat e_i^t)
+=D_\phi
+\left(
+\mathbf{F}_{\mathrm{fuse}}^t,
+\mathbf{q}_i^{t,-},
+\mathbf{b}_i^{t,-}
+\right),
 \tag{4}
 \]
 
-where \(\mathbf{M}_{\mathrm{cav}}\) masks absent sources. Dense classification and box-regression heads produce \(\mathbf{P}^{t}\) and \(\mathbf{R}^{t}\). The forecasting path does not add a second detector. It retains \(\{\mathbf{F}_{s}^{t}\}\) so that active actor queries can extract source-conditioned local context from the same encoded features.
+where the superscript \((- )\) denotes the propagated state. The existence score combines the query prediction with the dense classification response sampled at the decoded center. A learned measurement update combines the propagated and decoded states, after which the lifecycle module creates new queries, retains temporarily missed queries, and releases expired slots. Runtime identities are assigned internally and have no correspondence to annotation IDs. Motion forecasts are not used for proposal matching, state propagation, or lifecycle decisions in the default model.
 
-### C. Fused-BEV Persistent Query Tracking
+### D. Agent-Specific CAV Feature Aggregation
 
-At the beginning of frame \(t\), the previous receiver pose and planar velocity propagate active reference boxes with a constant-velocity model. The dense CMP heads decode a bounded set of current measurement proposals. A one-to-one assignment with private null alternatives associates active query slots to proposals within a metric gate; unmatched proposals initialize inactive slots. This association uses only propagated current state, proposal geometry, and proposal confidence. Forecast distributions are not used for matching.
-
-The propagated query content and reference box are decoded against \(\mathbf{F}_{\mathrm{fuse}}^{t}\) by a persistent deformable-attention query decoder,
+The fused BEV supplies a unified state estimate, while motion prediction additionally uses the aligned CAV features. For each active agent \(i\), DualCMP samples a local feature patch around \(\mathbf{b}_{i,xy}^t\) from every available \(\mathbf{F}_j^t\). Let \(\mathbf{f}_{ijn}^t\) denote the \(n\)-th sampled feature from CAV \(j\). The source token combines this feature with its patch position and the relative geometry between the agent and the CAV. Agent-source attention is then computed as
 
 \[
-(\widetilde{\mathbf{q}}_i^t,\widehat{\mathbf{b}}_i^t,
-\widehat{\mathbf{v}}_i^t,\widehat e_i^t)
-=D_\phi(\mathbf{F}_{\mathrm{fuse}}^t,
-\mathbf{q}_i^{t,-},\mathbf{b}_i^{t,-}).
+\begin{aligned}
+\mathbf{z}_{ijn}^t
+&=W_f\mathbf{f}_{ijn}^t+G(\mathbf{g}_{ij}^t)+P(\mathbf{p}_n),\\
+\mathbf{c}_i^t
+&=\operatorname{MHA}
+\left(
+\operatorname{LN}(\mathbf{q}_i^t),
+\{\mathbf{z}_{ijn}^t\}_{j,n},
+\{\mathbf{z}_{ijn}^t\}_{j,n}
+\right),
+\end{aligned}
 \tag{5}
 \]
 
-The existence logit reads both the query classifier and the dense CMP heatmap sampled at the decoded center. The state update combines propagated and measured boxes through a learned, bounded measurement gain. Lifecycle logic marks queries as newborn, observed, temporarily missed, or expired. A missing query coasts with the causal current-state model for at most a fixed time-to-live; it is not propagated with a five-second predicted trajectory. Query slots correspond to physical actors in one receiver scene, not to CAV sources.
+where \(\mathbf{g}_{ij}^t\) contains relative position, distance, bearing, and heading, and \(\mathbf{p}_n\) is the patch offset. Features from unavailable CAVs are masked before attention. The model does not assign a learned identity embedding to a fixed CAV slot; relative CAV geometry is used as positional information. The resulting context \(\mathbf{c}_i^t\) is used only by the motion predictor, so agent tracking continues to depend on the fused-BEV path.
 
-### D. Geometry-Conditioned Actor-Source Fusion
+### E. Motion Context Encoding
 
-For every active query, a \(3\times3\) metric patch centered on \(\mathbf{b}_{i,xy}^{t}\) is bilinearly sampled from each aligned source BEV. Let \(\mathbf{f}_{isn}^{t}\) denote patch token \(n\) from source \(s\). To avoid making source order a semantic identity, the source token is conditioned on the actor's geometry relative to the source sensor. We encode
+For every active query, DualCMP stores an ordered sequence of estimated agent states together with a validity mask. A temporal Transformer encodes relative position, motion increments, box state, heading, and relative time. The model also computes a robust velocity \(\overline{\mathbf{v}}_i^t\) from the median of all valid pairwise velocities and uses their dispersion to describe motion variation. Let \(n_i^t\) denote the number of valid history states. The query feature, cooperative context, temporal feature, motion descriptor, and current box are combined as
 
 \[
-\mathbf{g}_{is}^{t}=
-\left[
-\frac{\Delta x_{is}}{R_x},
-\frac{\Delta y_{is}}{R_y},
-\frac{\|\Delta\mathbf{p}_{is}\|_2}{R_d},
-\sin\Delta\beta_{is},\cos\Delta\beta_{is},
-\sin\Delta\psi_{is},\cos\Delta\psi_{is}
-\right],
+\mathbf{u}_i^t=
+\operatorname{LN}(\mathbf{q}_i^t)
++\alpha_c\operatorname{LN}(\mathbf{c}_i^t)
++\alpha_h\mathbf{h}_i^t
++M(\overline{\mathbf{v}}_i^t,\sigma_{v,i}^t,n_i^t)
++B(\mathbf{b}_i^t),
 \tag{6}
 \]
 
-where \(\Delta\beta\) is the actor-relative source bearing and \(\Delta\psi\) is the source-to-actor heading difference. Patch offsets are also embedded. The actor query attends to the valid source--patch tokens,
+where \(\mathbf{h}_i^t\) is the history feature and \(\alpha_c\) and \(\alpha_h\) are learned scales. Self-attention among forecast-eligible agents updates \(\mathbf{u}_i^t\) with inter-agent context.
+
+### F. Motion-Anchored Trajectory Decoding
+
+The decoder uses speed-scaled motion anchors to provide a stable initialization for multimodal prediction. Given scale \(\gamma_k\) for mode \(k\), the anchor at future step \(h\) is
 
 \[
-\mathbf{c}_{i}^{t}=
-\operatorname{MHA}\left(
-\operatorname{LN}(\mathbf{q}_{i}^{t}),
-\left\{
-W_f\mathbf{f}_{isn}^{t}+G(\mathbf{g}_{is}^{t})+P(n)
-\right\}_{s,n}
-\right).
+\mathbf{A}_{ikh}=\gamma_k\overline{\mathbf{v}}_i^t h\Delta t.
 \tag{7}
 \]
 
-Absent CAVs are hard-masked before the softmax. With fixed source-index embeddings disabled, permuting valid source slots and their transforms leaves \(\mathbf{c}_{i}^{t}\) unchanged up to floating-point tolerance. This path makes cooperation actor-conditioned while the dense perception path remains scene-conditioned.
-
-### E. Ordered Causal History and Actor Interaction
-
-CoLIF stores up to eleven online state observations for every active query. The history is transformed only as required by the receiver coordinate contract and is right-aligned with a validity mask. Each history token encodes relative position, one-step displacement, acceleration, box geometry, sine/cosine heading, relative time, and speed. A two-layer temporal Transformer produces an ordered history feature \(\mathbf{h}_{i}^{t}\). In parallel, the median of all valid pairwise velocities provides a robust velocity estimate \(\overline{\mathbf{v}}_i^t\), and the median-deviation statistic describes motion dispersion.
-
-The current query, cooperative source context, temporal feature, motion descriptor, and normalized current box form an actor feature
+Combining \(\mathbf{u}_i^t\) with a learned embedding for mode \(k\) gives the mode feature \(\mathbf{z}_{ik}^t\). Prediction heads estimate a bounded residual around each anchor, a mode probability, and the parameters of a correlated bivariate Gaussian. Let \(\mathcal{V}_i\) be the valid future steps. The resulting distribution is
 
 \[
-\mathbf{u}_{i}^{t}=
-\operatorname{LN}(\mathbf{q}_{i}^{t})
-+\alpha_c\operatorname{LN}(\mathbf{c}_{i}^{t})
-+\alpha_h\mathbf{h}_{i}^{t}
-+M(\overline{\mathbf{v}}_i^t,\sigma_{v,i}^t,a_i^t)
-+B(\mathbf{b}_i^t),
+\begin{aligned}
+\boldsymbol{\mu}_{ikh}
+&=\mathbf{A}_{ikh}+r_{\max}\tanh
+\left(\frac{R_h(\mathbf{z}_{ik}^t)}{r_{\max}}\right),\\
+\ell_{ik}
+&=U_\pi(\mathbf{z}_{ik}^t),
+\qquad
+\boldsymbol{\Sigma}_{ikh}
+&=U_{\Sigma,h}(\mathbf{z}_{ik}^t),
+\qquad
+\boldsymbol{\pi}_i=\operatorname{softmax}(\boldsymbol{\ell}_i),\\
+p(\mathbf{Y}_i\mid\mathbf{u}_i^t)
+&=\sum_{k=1}^{K}\pi_{ik}
+\prod_{h\in\mathcal{V}_i}
+\mathcal{N}
+\left(\mathbf{y}_{ih};
+\boldsymbol{\mu}_{ikh},\boldsymbol{\Sigma}_{ikh}\right).
+\end{aligned}
 \tag{8}
 \]
 
-where \(\alpha_c\) and \(\alpha_h\) are learned bounded scales. Self-attention among forecast-eligible active actors yields interaction-aware features. A newborn query is maintained immediately, but Eq. (8) is forecast-eligible only after two valid causal observations.
+The residual heads are initialized to zero, so the initial mean trajectories follow the history-derived anchors. The default model returns this motion proposal at inference and uses a cross-mode layer only for auxiliary supervision. We also implement an optional candidate-conditioned refinement variant: it samples the aligned CAV BEV features at the proposed trajectory locations and predicts residual corrections to the proposal. The optional variant is evaluated separately and does not alter the default prediction path.
 
-### F. Actor-Source Motion Proposal
+### G. Training Objectives
 
-Six scale factors \(\gamma_k\in\{0,0.5,0.75,1,1.25,1.5\}\) form physical motion anchors
+Training uses chronological clips and separates current-state estimation from motion prediction. In Phase 1, the PointPillar encoder, FuseBEVT, dense heads, and persistent query tracker are optimized with
 
 \[
-\mathbf{A}_{ikh}=\gamma_k\overline{\mathbf{v}}_i^t\,h\Delta t,
-\qquad \Delta t=0.1\ \mathrm{s}.
+\mathcal{L}_{\mathrm{state}}=
+\lambda_{\mathrm{det}}(\mathcal{L}_{\mathrm{cls}}+2\mathcal{L}_{\mathrm{reg}})
++\lambda_{\mathrm{exist}}\mathcal{L}_{\mathrm{exist}}
++\lambda_{\mathrm{box}}\mathcal{L}_{\mathrm{box}}
++\lambda_{\mathrm{vel}}\mathcal{L}_{\mathrm{vel}}
++\lambda_{\mathrm{aux}}\mathcal{L}_{\mathrm{aux}}.
 \tag{9}
 \]
 
-Actor-conditioned mode embeddings produce \(\mathbf{z}_{ik}^{t}\). Prediction heads estimate a bounded residual, Gaussian scale and correlation, and a mode logit:
+Training-only sequential matching assigns annotations to query slots. A matched query keeps its annotation identity while it remains active, and Hungarian matching is applied only to unmatched targets and available query slots. Annotation identities supervise the loss but are not passed to the model state.
+
+In Phase 2, the encoder, fused-BEV measurement path, and query tracker are frozen. The agent-source attention, history encoder, interaction module, and motion decoder are trained with correlated Gaussian negative log-likelihood and mode classification. For each supervised prediction layer \(l\), the positive mode \(k_i^{*(l)}\) is selected by the distance between its predicted endpoint and the final valid target position. Let \(L\) be the number of supervised prediction layers. The prediction objective is
 
 \[
-\boldsymbol{\mu}_{ikh}=
-\mathbf{A}_{ikh}+r_{\max}\tanh
-\left(\frac{R_h(\mathbf{z}_{ik}^{t})}{r_{\max}}\right),
-\tag{10}
-\]
-
-\[
-(\log\boldsymbol{\sigma}_{ikh},\rho_{ikh},a_{ik})
-=U(\mathbf{z}_{ik}^{t}),
-\qquad \pi_{ik}=\operatorname{softmax}_k(a_{ik}).
-\tag{11}
-\]
-
-The mean is relative to the current actor center. The residual heads are zero-initialized, so the untrained predictor begins from the causal physical anchors. The default deployed output is this proposal. A cross-mode layer remains as training-time deep supervision, but its refined output is not served because the frozen full-test comparison showed worse accuracy.
-
-### G. Optional Trajectory-Source State Refinement
-
-The optional high-capacity branch uses each proposal state as a spatial query. Its absolute receiver-frame location is
-
-\[
-\mathbf{x}_{ikh}^{t}=\mathbf{b}_{i,xy}^{t}+\boldsymbol{\mu}_{ikh}.
-\tag{12}
-\]
-
-At \(\mathbf{x}_{ikh}^{t}\), the refiner samples the **current** source BEVs; it does not claim access to future measurements. A mode token plus a learned horizon embedding queries the sampled source tokens, with the same hard CAV mask as Eq. (7). A shared temporal state encoder then processes the \(H\) states of each mode. The branch predicts bounded corrections to all proposal parameters:
-
-\[
-\boldsymbol{\mu}_{ikh}^{\mathrm{ref}}
-=\boldsymbol{\mu}_{ikh}+\Delta\boldsymbol{\mu}_{ikh},
-\quad
-\log\boldsymbol{\sigma}_{ikh}^{\mathrm{ref}}
-=\log\boldsymbol{\sigma}_{ikh}+\Delta\mathbf{s}_{ikh},
-\quad
-a_{ik}^{\mathrm{ref}}=a_{ik}+\Delta a_{ik}.
-\tag{13}
-\]
-
-Every correction head is initialized to zero. Consequently, proposal and refined outputs are exactly equal before optimization, including mean, uncertainty, correlation, and mode logits. This identity contract is essential: an earlier non-identity implementation degraded training because it replaced calibrated proposal statistics with random refined statistics.
-
-The two outputs are deliberately exposed by configuration. `cross_mode + proposal` is the default model supported by the best aggregate results. `trajectory_source + refined` retains the full candidate-conditioned branch for controlled capacity and difficult-target experiments.
-
-### H. Learning Objectives and Two-Stage Optimization
-
-Training uses causal clips and separates current-state learning from prediction learning.
-
-**Phase 1** initializes the shared encoder and FuseBEVT from the released CMP CoBEVT checkpoint and optimizes dense anchor classification/regression, query existence, current box, velocity, and lifecycle supervision. Training-only Hungarian matching associates predictions with current actors. Annotation identities never enter the runtime forward path.
-
-**Phase 2** freezes the encoder, FuseBEVT, measurement generator, and persistent query tracker. It trains only actor-source fusion, temporal and interaction encoders, the motion proposal, and the selected refinement branch. Freezing the current-state path ensures that forecast-architecture ablations use the same actor set, boxes, coverage, and tracking metrics.
-
-For a matched actor with valid future positions \(\mathbf{y}_{ih}\), the closest mode under masked average displacement is the positive mode \(k^*\). Each supervised prediction layer uses correlated Gaussian negative log-likelihood and mode classification:
-
-\[
-\mathcal{L}_{\mathrm{pred}}^{(l)}=
-\frac{1}{|\mathcal{V}|}
-\sum_{(i,h)\in\mathcal{V}}
+\mathcal{L}_{\mathrm{pred}}=
+\frac{1}{L}\sum_{l=1}^{L}
+\left[
+\lambda_{\mathrm{gmm}}
+\sum_{i}\sum_{h\in\mathcal{V}_i}
 -\log\mathcal{N}
 \left(
 \mathbf{y}_{ih};
-\boldsymbol{\mu}_{ik^*h}^{(l)},
-\boldsymbol{\Sigma}_{ik^*h}^{(l)}
+\boldsymbol{\mu}_{ik_i^{*(l)}h}^{(l)},
+\boldsymbol{\Sigma}_{ik_i^{*(l)}h}^{(l)}
 \right)
-+\lambda_{\mathrm{mode}}\operatorname{CE}(a_i^{(l)},k^*).
-\tag{14}
++\lambda_{\mathrm{mode}}
+\sum_i\operatorname{CE}
+\left(\boldsymbol{\ell}_i^{(l)},k_i^{*(l)}\right)
+\right].
+\tag{10}
 \]
 
-The Phase-2 objective sums proposal and auxiliary/refined layers. Distributed training aggregates raw numerators and valid counts across ranks before normalization, so a rank with no valid actor contributes neither fabricated samples nor an inconsistent denominator.
+Freezing the current-state path gives all forecast variants the same agent queries, boxes, and forecast coverage. At inference, DualCMP processes each receiver sequence in temporal order, resets the query state at scene boundaries, and produces trajectories without ground-truth annotations or precomputed tracking trajectories.
 
-### I. Strict-Online Inference
-
-Inference processes each `(scene, receiver)` timeline chronologically and resets state at scene boundaries. The model receives only runtime point clouds, poses, source masks, and timestamps. It does not read `ass_id`, ground-truth object IDs, future targets, or precomputed AB3DMOT/MTR trajectory pickles. Every active query with two valid observations produces six five-second trajectories. Evaluation matches runtime queries to annotations only after inference and reports tracking quality, forecast coverage, minADE, minFDE, miss rate, actor age, and receiver/shared/partner-support subsets.
-
-## IV. Current Experimental Evidence
+## V. Current Experimental Evidence
 
 ### A. Controlled Ablation Protocol
 
-All four CoLIF variants below load the same Phase-1 epoch-1 checkpoint, use seed 20, train Phase 2 for exactly one epoch on the official V2V4Real train split, and evaluate the fixed final checkpoint on the official test split. The data-loader generator and worker seeds are explicit; previously, model-construction RNG could alter point-shuffle order between ablations. Each run contains 855 optimizer steps with two GPUs, zero AMP overflow, zero no-signal skip, and zero cross-rank parameter-checksum delta. All variants produce identical MOTA, forecast coverage, and actor counts.
+All four DualCMP variants below load the same Phase-1 epoch-1 checkpoint, use seed 20, train Phase 2 for exactly one epoch on the official V2V4Real train split, and evaluate the fixed final checkpoint on the official test split. The data-loader generator and worker seeds are explicit; previously, model-construction RNG could alter point-shuffle order between ablations. Each run contains 855 optimizer steps with two GPUs, zero AMP overflow, zero no-signal skip, and zero cross-rank parameter-checksum delta. All variants produce identical MOTA, forecast coverage, and actor counts.
 
 | Forecast configuration | minADE at 1/3/5 s (m) | minFDE at 1/3/5 s (m) | MOTA | Coverage |
 | --- | --- | --- | ---: | ---: |
@@ -259,11 +251,11 @@ The optional trajectory-source refiner also improves every ADE/FDE over the no-s
 
 ### B. CMP Reference Boundary
 
-The locally reproduced CMP no-aggregation checkpoint reports minADE/minFDE of 4.4001/7.5559 m at 5 s, whereas default CoLIF reports 2.5870/4.3804 m. These values are numerically lower by 41.21% and 42.03%, respectively, but the protocols are not directly equivalent. The audited CMP cache filters detections through ground-truth IoU matching, carries ground-truth identity into tracking, and evaluates a different fixed-history target population. Accordingly, the current manuscript reports this comparison as a reproduced numerical reference, not as a protocol-matched state-of-the-art claim.
+The locally reproduced CMP no-aggregation checkpoint reports minADE/minFDE of 4.4001/7.5559 m at 5 s, whereas default DualCMP reports 2.5870/4.3804 m. These values are numerically lower by 41.21% and 42.03%, respectively, but the protocols are not directly equivalent. The audited CMP cache filters detections through ground-truth IoU matching, carries ground-truth identity into tracking, and evaluates a different fixed-history target population. Accordingly, the current manuscript reports this comparison as a reproduced numerical reference, not as a protocol-matched state-of-the-art claim.
 
 ### C. Supported and Unsupported Claims
 
-The completed ablations support the following statement: retaining aligned source features for actor-conditioned forecasting improves short- and mid-horizon trajectory accuracy beyond using only the persistent actor state, and ordered causal history provides an additional gain while tracking output remains fixed. They do not support three stronger statements: that a trajectory-source refiner is always better than actor-source fusion, that one observation is sufficient for reliable long-horizon forecasting, or that predicted futures improve fused-BEV tracking. Those statements are excluded from the final method claim.
+The completed ablations support the following statement: retaining aligned CAV features for agent-specific forecasting improves short- and mid-horizon trajectory accuracy beyond using only the persistent agent state, and ordered motion history provides an additional gain while tracking output remains fixed. They do not support three stronger statements: that a trajectory-conditioned refiner is always better than agent-specific feature aggregation, that one observation is sufficient for reliable long-horizon forecasting, or that predicted futures improve fused-BEV tracking. Those statements are excluded from the final method claim.
 
 ## Working References
 
@@ -283,6 +275,24 @@ The completed ablations support the following statement: retaining aligned sourc
 
 [8] S. Papais *et al*., “ForeSight: Multi-View Streaming Joint Object Detection and Trajectory Forecasting,” in *Proc. IEEE/CVF ICCV*, 2025.
 
+[9] T.-H. Wang *et al*., “V2VNet: Vehicle-to-Vehicle Communication for Joint Perception and Prediction,” in *Proc. ECCV*, 2020.
+
+[10] J. Gu *et al*., “ViP3D: End-to-End Visual Trajectory Prediction via 3D Agent Queries,” in *Proc. IEEE/CVF CVPR*, 2023.
+
+[11] J. Zhong *et al*., “CoopTrack: Exploring End-to-End Learning for Efficient Cooperative Sequential Perception,” in *Proc. IEEE/CVF ICCV*, 2025.
+
+[12] H. Ruan, H. Yu, W. Yang, S. Fan, and Z. Nie, “Learning Cooperative Trajectory Representations for Motion Forecasting,” in *Advances in Neural Information Processing Systems*, 2024.
+
+[13] S. You, L. Weng, and F. Gao, “ViTraj: Learning Dual-Side Representations for Vehicle-Infrastructure Cooperative Trajectory Prediction,” in *Proc. ACM Multimedia*, 2025.
+
+[14] N. A. Madjid *et al*., “Collaborative Trajectory Prediction via Late Fusion,” arXiv:2604.22973, 2026.
+
+[15] H. Yu *et al*., “V2X-Seq: A Large-Scale Sequential Dataset for Vehicle-Infrastructure Cooperative Perception and Forecasting,” in *Proc. IEEE/CVF CVPR*, 2023.
+
+[16] K. Wu, J. Qiao, and Y. Zhang, “CoPAD: Multi-Source Trajectory Fusion and Cooperative Trajectory Prediction With Anchor-Oriented Decoder in V2X Scenarios,” in *Proc. IEEE/RSJ IROS*, 2025.
+
+[17] X. Zhang *et al*., “Co-MTP: A Cooperative Trajectory Prediction Framework With Multi-Temporal Fusion for Autonomous Driving,” in *Proc. IEEE ICRA*, 2025.
+
 ## Author Evidence and Citation Ledger
 
 | BibTeX key | Supported statement | Verified evidence |
@@ -295,5 +305,14 @@ The completed ablations support the following statement: retaining aligned sourc
 | `zhou2023qcnet` | QCNet uses query-centric encoding and proposal-conditioned refinement. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2023-CVPR-QCNet.md`, Secs. 1, 3.3, and 4.3. |
 | `pang2023pftrack` | PF-Track uses predicted future motion in persistent tracking/re-association. | CVPR 2023 paper, Secs. 3.1 and 3.3. |
 | `papais2025foresight` | ForeSight maintains multiple-hypothesis forecast memory for subsequent streaming perception/forecasting. | `/home/qkb/Project/Reference/Paper/TXT/2025-ICCV-ForeSight.txt`, Secs. 1 and 3. |
+| `wang2020v2vnet` | V2VNet uses spatially aware cross-vehicle aggregation for joint perception and motion forecasting. | `/home/qkb/Project/Reference/Paper/TXT/2020-ECCV-V2VNet.txt`, Abstract and Secs. 1 and 3. |
+| `gu2023vip3d` | ViP3D propagates 3-D agent queries through detection, tracking, and trajectory prediction. | `/home/qkb/Project/Reference/Paper/TXT/2023-CVPR-ViP3D.txt`, Abstract and Secs. 1 and 3. |
+| `zhong2025cooptrack` | CoopTrack uses persistent instance queries and learnable cross-agent association for cooperative sequential perception. | `/home/qkb/Project/Reference/Paper/TXT/2025-CoopTrack.txt`, Abstract and Secs. 1 and 3. |
+| `ruan2024v2xgraph` | V2X-Graph constructs forecasting-oriented motion and interaction representations from multi-view cooperative trajectories. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2024-NeurIPS-V2X-Graph.md`, Introduction and Secs. 4.1--4.3. |
+| `you2025vitraj` | ViTraj retains vehicle-side and infrastructure-side trajectory features and performs feature-side selection and cooperative interaction. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-ACM-MM-ViTraj.md`, Introduction and Secs. 4.1--4.2. |
+| `madjid2026latefusion` | The late-fusion framework retains observer-specific forecasts and combines them after local prediction with temporal alignment and association. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2026-arxiv-Collaborative-Trajectory-Prediction.md`, Introduction and Secs. 3.1--3.2. |
+| `yu2023v2xseq` | The PP-VIC baseline fuses vehicle and infrastructure trajectories with CBMOT before TNT or HiVT forecasting. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2023-CVPR-V2X-Seq.md`, Sec. 6.2.1. |
+| `wu2025copad` | CoPAD matches multi-source trajectories with the Hungarian algorithm and fuses matched trajectories with Kalman filtering before prediction. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-IROS-CoPAD.md`, Secs. III-A--III-B. |
+| `zhang2025comtp` | Co-MTP preprocesses vehicle and infrastructure histories and performs multi-temporal trajectory fusion in a heterogeneous graph. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-ICRA-Co-MTP.md`, Secs. III-B--III-D. |
 
 Before submission, the working references must be converted to a verified BibTeX database. The current official-test monitoring policy must be disclosed: no validation split is used, test metrics are recorded after each fixed epoch, and checkpoints are not automatically selected by test score.
