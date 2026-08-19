@@ -190,14 +190,14 @@ source_index_embedding: false
 - acceleration；
 - z 和 box dimensions；
 - sin/cos yaw；
-- normalized causal time；
+- normalized observation time；
 - speed。
 
-两层 causal-window Transformer 在 mask 下编码最近最多 11 帧。历史不足时右对齐，不伪造固定 11 帧有效轨迹。
+两层 temporal Transformer 在 padding mask 下编码截至当前时刻的最近最多 11 帧。历史不足时右对齐，不伪造固定 11 帧有效轨迹。该编码器在已观测历史内部使用双向 self-attention，没有 triangular causal mask；“不读取未来帧”由在线输入前缀保证，而不是由因果注意力保证。
 
 ### 7.2 Robust motion descriptor
 
-所有有效历史点对形成速度估计，取 pairwise median 作为 causal velocity；相对 median 的平均偏差作为 dispersion。它比只取首末点更不易受单帧 tracking jitter 影响。
+所有有效历史点对形成速度估计，取 pairwise median 作为 history-derived velocity；相对 median 的平均偏差作为 dispersion。它比只取首末点更不易受单帧 tracking jitter 影响。
 
 ### 7.3 Actor interaction
 

@@ -1,5 +1,81 @@
 # HANDOFF
 
+## 2026-08-19 修改模型代码前的Git恢复点
+
+- 当前所有已跟踪代码、配置和文档将以`dualcmp-pre-code-change-20260819`标签保存，作为下一轮模型代码修改前的恢复点。
+- 本恢复点中的三处代码/config差异仅修改注释和docstring措辞，不改变张量计算、模型参数、forward、loss或推理行为。
+- `.serena/`、训练日志、未跟踪图片、审计草稿、`paper.md`和`third_party/`不纳入代码checkpoint，均保留在工作目录中且不会删除。
+- 恢复整个已跟踪项目可切换或读取该标签；仅恢复模型代码可对指定路径执行`git restore --source=dualcmp-pre-code-change-20260819 -- <paths>`。
+
+## 2026-08-19 Introduction段首段尾与来源对照重写
+
+- `manuscript.md` 的 Introduction 已重组为四个正文段：任务 stakes/V2X opportunity、intermediate/trajectory/prediction-level fusion stages、target-conditioned source relevance limitation、DualCMP design/evidence；贡献列表同步保留 online states、shared LiDAR encoder、source-specific spatial evidence、motion-anchor motivation 和 fixed-tracking protocol。
+- 按用户要求没有因为本地语料词频低而删除必要概念；正文保留 `source-specific spatial evidence`，并用 `aligned CAV feature maps` 指明其实现承载。P2 保留 prediction-level fusion，P4 保留 persistent history 长度/状态噪声到 motion anchors 的因果说明。
+- 对段首用词做了精确词频和段落功能核对：`cooperative viewpoint` 在本地 Markdown 中为0次，`multiple viewpoints`为18次、`different viewpoints`为10次；正文已改为 `different viewpoints ... observing CAVs`，只替换不自然的名词组合，没有删去 target-dependent viewpoint relevance 的科学内容。
+- `To implement this interface` 在本地语料中为0次，且 `interface` 在该位置容易产生软件API语感；正文已改为 `One limitation ...` → `To address this limitation, DualCMP ...`，P1 也改用 `When forecasting begins`，避免在引言段首和段尾堆叠 interface/this/gap 这类抽象指代。
+- 引言正文和 roadmap 已进一步移除 `this/these` 的代词回指：使用 `the inputs`、`CAV observations`、`the fused BEV representation`、`the limitation` 和 `the remainder of the paper`，确保每个段首/段尾的技术对象可直接定位。
+- 新增 `docs/dualcmp_introduction_rewrite_ledger.md`，逐句记录 29 个正文/贡献/roadmap 句子的本地来源、模仿的句法功能、段首段尾职责和四段之间的直接衔接。IS-FUSION 与 QD-DETR 已从本地 Markdown 核验并纳入来源卡；它们仅作为 scene/instance 粒度和 query-dependent relevance 的结构参照，不被写成 cooperative motion prediction 的直接证据。
+- PaperMeld 只读验证通过：232 条 catalog records、2567 个本地图像链接、23 个 code links。`git diff --check` 通过；Introduction audit 脚本报告正文区域 861 词，但因 Markdown 图片、caption、贡献列表和 roadmap 将其计为10段，并且不识别 `\cite{}` BibTeX keys，报告0个编号引用是已知诊断误报。独立检查确认 Introduction 的11个引用键均存在于当前 working references，来源表29句经引用/标点归一化后全部对应正文。
+- 本次任务修改了 `manuscript.md` 和新增上述来源审计文件；模型代码、配置、日志、Abstract、Related Work、Method 和文献库目录未修改。工作树仍保留本任务开始前的既有用户改动。
+
+## 2026-08-18 DualCMP Introduction两类pipeline与Fig. 1 v3
+
+- Introduction当前为“五段正文＋贡献列表”：stakes、current-state estimation、motion forecasting、existing interfaces、DualCMP proposal/evidence。五段为93/114/150/133/207词；审计脚本统计978词。
+- 用户提供的三块结构已分别成段：current-state段解释fusion价值与separate-stream代价；forecasting段解释target-dependent CAV use和fused-BEV failure mode；interface段用early feature fusion与later trajectory/prediction fusion收束trade-off。proposal段继续解释persistent query和motion anchor。
+- 已删除新增P5（persistent box/velocity/existence、ordered history、motion-anchored decoder、runtime无需precomputed tracks及验证的独立段），并逐字恢复此前159词第四段。没有把被删句子拆散后塞回其他段落。
+- 按用户要求完成句级语料复核：对viewpoint作用、三类cooperative interface、Dual representation/persistent reference、persistent state/multimodal decoder四个论证单元各读取约8个正文句，共32个source cards。最后一组曾用于被删除P5，现只作为拒绝记录保留，不能声称8篇论文共同支撑P5中的每个独立意思。
+- 纠正此前“8条句子=8篇论文”的错误：`docs/dualcmp_introduction_audit.md`第7.2节现为P2 viewpoint/context、P3三类interface、P3 single-state reference三个论证单元分别列出8篇不同论文；同一论文在每组中只计一次。
+- `manuscript.md`已单独纳入Git版本管理：`83993f7`为上一可恢复版本，当前提交为`056d2a4`（`docs: restructure DualCMP fusion argument`）。相关提交均只包含`manuscript.md`；模型代码、配置、日志和其他脏文件未进入提交。
+- 当前P1--P5句长序列为`14/17/19/23/20`、`13/15/23/10/21/15/17`、`7/21/19/28/13/29/21/12`、`17/22/30/25/39`、`26/21/10/20/25/21/14/23/8/20/19`。禁用`yet`和`Taken together`；所有新增句在写入前均检索本地语料或核对当前代码。
+- 第二段不再以7词的`Consider...`开头，改为18词主题句后在段中给出场景。删除`This variation matters because`等解释性口语，影响关系统一使用`may/can`。第三段改用`While...`让步主题句，Introduction正文不再点名V2VNet、CMP、V2XPnP、PP-VIC、CoPAD或Co-MTP，只保留方法族及引用；具体模型比较留在Related Work。
+- Fig. 1在正文只引用一次：`As shown in Fig. 1`后直接对照aligned maps先于agent-state formation、target reference后于state estimation的接口时序。删除`Figure 1 compares...`、逐panel讲解及proposal段中的`Figure 1(c) summarizes...`；panel说明由caption承担。
+- Proposal与evaluation合并为一个方法--证据段，按`aggregates → updates → integrates → generate → We evaluate → To isolate → Results show`推进。贡献列表改为三个具体交付物：persistent-query LiDAR framework、agent-specific CAV feature aggregation、motion-anchored decoder及fixed-tracking evidence；不再把泛化`strategy`或单独短验证段列为贡献。
+- Abstract已在用户指出核心转折无意义后从头重写。新版本不再以“aligned CAV feature maps are not used”作为问题，也删除`variable-length histories`、runtime annotations与precomputed tracking cache；论证链改为：两类pipeline分别改善scene understanding与historical motion representation → motion prediction还需要随agent/viewpoint变化的spatial context → DualCMP用同一LiDAR encoding形成fused BEV并执行agent-specific aggregation → decoder与V2V4Real结果。当前约155词、9句。
+- 新增`docs/dualcmp_abstract_audit.md`。实际阅读全文摘要：CMP、V2XPnP、V2X-Graph、ViTraj、CoPAD、Co-MTP、HPNet、QCNet及T-ITS Social-Pose/TrajPRed/Efficient Baselines。可稳定提取的173篇`ALL_MARKDOWN`摘要词数P25/median/P75为161/183/208；20篇`TITS_MARKDOWN`为161/184/206，句数中位数均为8。审计文档记录各论文的sentence-role、可复用功能与不宜模仿之处。
+- PaperMeld与正式论文页面复核了trajectory-fusion路线：V2X-Seq的PP-VIC先以CBMOT融合vehicle/infrastructure trajectories再运行TNT/HiVT；V2X-Graph学习across-view trajectory associations并融合motion/interaction features；CoPAD采用Hungarian matching和Kalman filtering；Co-MTP在heterogeneous graph中融合vehicle/infrastructure histories。CMP与2026 late-fusion还包含prediction aggregation，但按用户要求不作为Fig. 1的独立类别，只在Related Work中承认。
+- Abstract和Introduction现并列两种代表性输入组织：`intermediate fusion`与`trajectory fusion`。共同的可核实接口差异是：前者向下游提供fused BEV features，后者提供cooperative trajectory features；两者均未在agent states形成后用aligned CAV feature maps构造agent-specific forecasting context。该表述不推导任何一种fusion必然造成精度下降。
+- 用本地229篇Markdown做术语复核：`feature fusion`386次/76篇、`intermediate fusion`235/52、`trajectory fusion`23/7、`historical trajectories`102/36、`cross-view`84/19、`data association`133/17、`agent-centric`71/34、`agent-specific`21/9、`agent queries`97/15、`motion history`45/9、`interaction features`80/18。摘要与引言已改用这些术语，移除核心叙事中的`actor-level`、`per-CAV`和`dual-granularity cooperation`。
+- Fig. 1最终构图为三行横向pipeline：`(a) Intermediate feature fusion`、`(b) Trajectory association`、`(c) DualCMP`。文件为`figures/dualcmp_introduction_fig1_v3.png`（1774×887 RGB PNG）；图中实际FuseBEVT输出统一标为`Fused BEV`，不再标为`Shared BEV`。生成规格见`figures/dualcmp_introduction_fig1_v3_prompt.md`；v1/v2均为已替换草稿。
+- 论文题目相应更新为 **DualCMP: Task-Adaptive Cooperative Motion Prediction with Fused and Source-Specific BEV Representations**。Method中的FuseBEVT输出及符号统一为`fused BEV`/`F_fuse`，`shared`仅保留在weight-shared encoder等确有共享参数含义的位置。
+- 新增working references/citation ledger：`yu2023v2xseq`、`wu2025copad`、`zhang2025comtp`。图中不画prediction-level aggregation，但Related Work明确记录CMP和2026 late-fusion的forecast aggregation，避免把两行Figure比较误写成完整领域taxonomy。
+
+## 2026-08-17 DualCMP Introduction深度审读与重写（历史；以2026-08-18条目为准）
+
+- 初次Fig. 1专项审读查看了CMP、V2XPnP、V2X-Graph、HPNet、V2VNet以及T-ITS H2C、Social-Pose、TrajPRed，并统计正文引用与caption长度；该阶段形成的v1构图后来被2026-08-18的两类pipeline审计替换。
+- 该阶段先删除了空泛的`Fig. 1 illustrates this distinction`并建立panel-specific引用；当前引用与caption以顶部2026-08-18条目及`manuscript.md`为准。
+- `figures/dualcmp_introduction_fig1_v1.png`是已替换的初始草稿；当前稿为`figures/dualcmp_introduction_fig1_v3.png`。
+- 使用PaperMeld逐段阅读全文Introduction：CMP、V2XPnP、V2X-Graph、ViTraj、UniMM-V2X、HPNet、QCNet，以及T-ITS TrajPRed/MapFE4MP；另用Cross-Stitch、MTAN、DSN复核shared/specific representation叙事。完整段落职责、连接词、相邻工作边界、拒稿检查和最终claim map写入`docs/dualcmp_introduction_audit.md`。
+- Introduction主线改为：motion-prediction stakes → intermediate-fusion与trajectory-fusion两条代表性pipeline → aligned CAV feature maps在agent-centric prediction中的接口差异 → DualCMP的task-adaptive feature fusion → fixed-tracker验证 → 3条贡献。相邻工作改为方法族总结，不在Introduction展开模型结构。
+- Dual设计理由现限定为：fused BEV更新single receiver-side persistent agent state；agent query形成后再访问aligned CAV feature maps。论文不声称intermediate fusion必然损害预测，也不把不同视角清晰度本身直接等同于性能下降。
+- 追加阅读全文T-ITS H2C/Social-Pose/SGANv2及HiVT/V2VNet。论断强度按原文惯例分层：代码接口写成可核实事实；可能影响使用`may/can`或研究问题；性能变化只引用受控实验。摘要与Introduction已移除`all/always/inevitably/necessarily/guarantee/once fusion then...`式推导；可见Introduction约648词，Abstract约153词。
+- Introduction结果段按用户要求删除1/3/5秒和5秒弱增益的具体数字，只保留固定tracker、agent sets和coverage下aligned CAV feature maps与ordered motion history改善预测的结论。
+- 新增并核验`ruan2024v2xgraph`、`you2025vitraj`、`madjid2026latefusion`三条working references/citation-ledger记录。Introduction使用10个BibTeX keys，全部存在ledger；审计脚本不识别BibTeX keys而报告0个编号引用，这是已知false positive。
+- Figure 1的早期隐藏占位已经由`figures/dualcmp_introduction_fig1_v3.png`替换并写入Introduction。
+
+## 2026-08-17 DualCMP Method章节按本地论文与代码重写
+
+- 使用PaperMeld定位并阅读全文中的Method章节：CMP、V2XPnP、V2X-Graph、ViP3D、HPNet、HiVT、QCNet和MTR；其主小节通常按`problem/overview → representation/encoder → fusion/interaction → decoder → objective`组织，主小节数量中位数约为4。
+- `manuscript.md`现将Problem Formulation独立为Section III，并把Method设为Section IV的7个小节：Method Overview、Shared and Source-Specific BEV Encoding、Persistent Query-Based Agent Tracking、Agent-Conditioned Source Feature Aggregation、Motion Context Encoding、Motion-Anchored Trajectory Decoding、Training Objectives。标题采用相关论文常见的“对象＋操作”形式；原Multimodal Motion Prediction因同时包含history/interaction encoding与trajectory decoding而拆成两个小节。optional trajectory-source refiner降为decoder小节中的短段落，strict-online行为并入问题定义和训练/推理边界；框架图及其正文引用按用户要求暂时留空。
+- 新Method逐项对照当前`PointPillarColif`、actor cooperative fusion、motion-anchored forecast、sequence dataset和`ColifLoss`。明确默认forecast不反馈tracking、至少两次有效观测后预测、Phase 2冻结current-state路径，并把旧文档中错误的“按平均位移选正模态”修正为代码实际使用的最终有效目标点/预测endpoint匹配。
+- 保留10个承担定义或核心机制的公式；删除张量尺寸、patch大小、TTL、模态数、预测时长、DDP归一化等Implementation Details。Method共6个小节、公式编号1--10连续、display/aligned环境成对、无tab或Git whitespace错误；引用键`wang2025cmp`和`gu2023vip3d`均已在citation ledger中登记。
+- 对八篇本地Method的连接词统计显示：`where`82次，`Here`5次，`Yet`0次，`However`8次；当前Method使用`where`5次、`Following`2次、`Given`1次，不使用`Here/There/Yet/However/Moreover/Furthermore/Consequently`。本次只修改论文文档，没有修改或重新测试模型代码。
+- 追加审计PointPillars、CoBEVT、V2X-ViT、Where2comm、DiscoNet、V2VNet、V2XPnP与CMP的点云符号和framework overview。Problem Formulation现采用“Consider N agents”结构，定义CAV j的LiDAR L_t^j、pose xi_t^j、receiver r及代码实际使用的T_{j->r}^t=(xi_t^r)^{-1}xi_t^j；删除与“可用CAV集合”重复的runtime mask，mask只在padded BEV fusion处定义。Problem Formulation与Method Overview已拆为独立章节；Overview沿aligned CAV feature maps、fused BEV、persistent agent queries、agent-specific aggregation和forecast的实际数据流介绍。
+- 对比CMP、V2XPnP、V2X-Graph、HiVT、HPNet和ViP3D实际框架图后，用内置ImageGen生成新的DualCMP方法图构图初稿`figures/dualcmp_framework_imagegen_v1.png`（1846×852 RGB）。图以白底、横向流水线、低饱和分支配色表示aligned CAV features、fused-BEV tracking、agent-specific aggregation、motion context和decoder；删除旧图TACF/SFQT/GAF/CHIE/MAMD缩写，不画loss、训练phase、optional refiner或forecast-to-tracking feedback。该PNG尚未写入manuscript，也不是最终可编辑矢量稿。
+
+## 2026-08-15 epoch 9 corrected fixed-horizon independent evaluation
+
+- Independently evaluated `opencood/logs/colif_actor_source_release/checkpoint_epoch_009.pth` on the complete official test split with two RTX 3090 processes, `receiver_ids=[0,1]`, and `forecast_metric_protocol=cmp_fixed`. Strict checkpoint loading succeeded with all 542 model-state keys; the run completed 3,986 receiver frames without traceback.
+- Corrected 10 Hz metrics use ADE windows `[:10]/[:30]/[:50]`, FDE indices `9/29/49`, and one common complete-5-s population of 32,833 matched actor-frames. Results: minADE `0.908741/1.496983/2.125372 m`, minFDE `1.092558/2.184541/3.350971 m`, MR@2m `0.133281/0.275546/0.334359` at 1/3/5 s.
+- Tracking/lifecycle results: MOTA `0.650443`, MOTP center `0.726322 m`, recall `0.810801`, precision `0.848606`, IDS `1,037`, fragments `693`, forecast coverage `0.804925`.
+- Result: `opencood/logs/colif_actor_source_release/metrics_test_cmp_fixed_epoch009.json`; log: `opencood/logs/colif_actor_source_release/eval_test_cmp_fixed_epoch009.log`.
+- The checkpoint embeds Phase 2, epoch 9, seed 20, 50 future frames, both receivers, and Git commit `9cafb8c`; its saved dirty status includes the model files. Current model-code differences relative to that commit are documentation-string wording only, while the metric evaluator is the intentional later change. Thus the checkpoint is directly loadable for current evaluation, but corrected fixed-horizon numbers must not be mixed with the older masked-variable-horizon rows without a protocol label.
+
+## 2026-08-14 DualCMP 题目与论文主张收紧
+
+- 论文题目当时暂定为 **DualCMP: Task-Adaptive Cooperative Motion Prediction with Shared and Source-Specific BEV Representations**；2026-08-18已按实际FuseBEVT输出更正为`Fused and Source-Specific`。
+- 当前主张不再把 feature aggregation 直接定义为已证实的“information-loss bottleneck”，而是提出可由现有固定 tracker 消融回答的问题：fused BEV features与aligned CAV feature maps是否为预测提供互补信息。persistent agent queries只作为系统接口，不作为首创贡献。
+- Introduction 已明确 V2VNet、UniMM-V2X、ViP3D、CoopTrack 的相邻工作边界，限定 V2V4Real 为 dual-vehicle 证据，并如实报告 5 s minFDE 仅改善 0.4%；当前证据支持 short/intermediate-horizon conditional forecasting，不支持长期意图、跟踪改善或多源扩展性主张。
+
 ## 2026-08-14 CMP multi-ego receiver 接口与恢复点
 
 - 已创建当前 CoLIF 主仓库恢复点：`5e3477a checkpoint: current CoLIF implementation`。训练日志/checkpoint（约194 GB）和`.serena/`索引没有提交；MOTR 外部依赖的两处本地兼容修复位于其独立仓库提交`cbdde0c fix: support batched CoLIF queries`，未推送。
@@ -372,3 +448,14 @@
   架构入口和边界见 `model_design.md` 顶部“当前规范”。
 
 ---
+
+# 2026-08-18 `paper.md` 全量审计归档
+
+- 新建 `/home/qkb/Project/CoLIF/paper.md`，作为论文、模型、数据、训练、评测、失败链和学术写作审计总档；它不是投稿正文。
+- 综合正文使用“当前已证实 / 证据性推断 / 未证实 / 已否证 / 历史已替换 / 待核验”状态，避免旧CoLIF、future-feedback和当前DualCMP结论混写。
+- 原文附录包含当前 `model_design.md`、`docs/colif_failure_postmortem.md`、`docs/colif_training.md`、Abstract/Introduction审计、`manuscript.md` 与本 `HANDOFF.md`。
+- 已通过Codex任务历史接口分页回读当前任务：17页、1,400条可见用户/助手消息、486,839字符；全部写入附录H。隐藏推理、工具调用与命令输出没有伪装成审计结论。
+- 已回读任务开头引用的Codex任务：5页、294条可见消息、113,637字符，写入附录I；已回读引用的ChatGPT对话：4页、62条可见消息、320,340字符，写入附录J。
+- ChatGPT历史接口单条消息上限为20,000字符；引用对话有3条达到上限，已明确标记为可能截断。当前任务没有消息达到上限。
+- 最终复核时 `paper.md` 为45,765行、156,940词、2,071,721字节，SHA-256为 `6fa137a74642d1a33b512683e32bb9a33236e7cc7a396930e38cc8590c85ce38`（后续继续编辑时该hash自然变化）。
+- 未修改模型代码、配置、训练日志或实验结果；当前工作树原有大量用户/历史改动均保留。

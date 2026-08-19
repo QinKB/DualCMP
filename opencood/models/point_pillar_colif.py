@@ -868,7 +868,7 @@ class PointPillarColif(nn.Module):
         detach_interval=None,
         loss_start_index: int = 0,
     ):
-        """Run one frame or a whole causal clip.
+        """Run one frame or a chronologically ordered clip.
 
         A clip is deliberately exposed through the ordinary ``forward``
         entrypoint so DDP observes one forward graph followed by one backward.

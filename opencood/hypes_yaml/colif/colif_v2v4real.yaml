@@ -31,7 +31,7 @@ train_params:
   # objective and lets GradScaler adapt instead of weakening the GMM loss.
   amp_init_scale: 1
   bptt_len: 4
-  # Tracking uses causal burn-in.  Phase 2 uses the full 11-frame online
+  # Tracking uses chronological burn-in.  Phase 2 uses the full 11-frame online
   # history but does not back-propagate a future cue into tracking.
   phase1_warmup_length: 7
   phase1_unroll_length: 4
@@ -172,7 +172,7 @@ model:
       geometry_conditioning: true
       source_index_embedding: false
     state:
-    # Keep at most eleven causal online observations for robust motion anchors.
+    # Keep at most eleven online observations for robust motion anchors.
       memory_len: 11
       # Preserve the Phase-1 tracker GRU's four-step input contract; the
       # longer history is consumed only by the motion forecaster.
@@ -210,7 +210,7 @@ model:
       nms_distance: 2.5
       # A single 3D observation cannot identify motion.  The persistent state
       # is born immediately, but long-horizon forecasting starts only after a
-      # second causal observation.  Equally young actors are kept out of the
+      # second observation.  Equally young actors are kept out of the
       # interaction context so they cannot corrupt mature center predictions.
       min_forecast_history_steps: 2
       min_context_history_steps: 2
@@ -232,10 +232,10 @@ model:
       motion_context_ffn: 1024
       motion_residual_limit_m: 12.0
       # Query yaw is a direct neural measurement whereas CMP trained MTR on
-      # AB3DMOT-filtered headings.  Restore that causal smoothing at the
+      # AB3DMOT-filtered headings.  Restore that past-only smoothing at the
       # adapter boundary before applying CMP's legacy degree-valued transform.
       heading_smoothing_steps: 5
-      # Ages 1--11 already occur naturally when every causal training clip
+      # Ages 1--11 already occur naturally when every chronological training clip
       # starts from an empty online state.  Extra random truncation previously
       # made mature histories a tiny minority and damaged the dominant test
       # distribution.

@@ -1,4 +1,4 @@
-"""Causal motion-anchored multimodal forecasting for persistent queries."""
+"""History-conditioned multimodal forecasting for persistent queries."""
 
 from __future__ import annotations
 
@@ -10,14 +10,15 @@ import torch.nn.functional as F
 
 
 class MotionAnchoredForecastHead(nn.Module):
-    """Predict learned residuals around robust causal motion anchors.
+    """Predict learned residuals around history-derived motion anchors.
 
     A single observation creates a persistent actor state but cannot identify
     velocity.  Once two observations exist, pairwise history velocities form a
     robust motion estimate.  Six generic speed hypotheses provide a stable
     multimodal backbone; query/context features learn interaction-conditioned
-    residual trajectories, uncertainty, and mode probability.  Everything in
-    this module is runtime-causal and actor-ID free.
+    residual trajectories, uncertainty, and mode probability.  The module uses
+    only observations available at the current receiver time and is actor-ID
+    free.
     """
 
     def __init__(self, query_dim: int, args: dict):
@@ -194,7 +195,7 @@ class MotionAnchoredForecastHead(nn.Module):
         if self.residual_limit_m <= 0.0:
             raise ValueError("motion_residual_limit_m must be positive")
 
-        # Initialization is exactly the causal physics model.  Learning can
+        # Initialization is exactly the history-derived physics model.  Learning can
         # improve it, but cannot begin by destroying the reliable motion prior.
         for score_head in (self.proposal_mode_score, self.mode_score):
             if self.mode_interaction == "actor_conditioned":
@@ -302,7 +303,7 @@ class MotionAnchoredForecastHead(nn.Module):
         )
 
     def _robust_motion(self, history_box, history_mask):
-        """Return pairwise-median velocity and causal dispersion."""
+        """Return pairwise-median velocity and dispersion from observed history."""
 
         xy = history_box[..., :2]
         pair_valid = (
@@ -361,7 +362,7 @@ class MotionAnchoredForecastHead(nn.Module):
         )
 
     def _encode_temporal_history(self, history_box, history_mask):
-        """Encode the ordered variable-length history without future access."""
+        """Encode the observed history prefix with bidirectional self-attention."""
 
         history_box, history_mask = self._right_align_history(
             history_box, history_mask

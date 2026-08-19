@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --init-cobevt-checkpoint \
   pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
   --output-dir opencood/logs/colif_fused_phase1_release \
-  --epochs 2 --workers 2 --eval-workers 2 --log-every 50
+  --epochs 20 --workers 2 --eval-workers 2 --log-every 50
 ```
 
 Phase 1 使用 FP32。当前四组公平预测实验共同使用的冻结 tracker 为：
@@ -68,9 +68,10 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_fused_v7_phase1_predict_correct_2epoch_20260812/checkpoint_epoch_001.pth \
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
   --output-dir opencood/logs/colif_actor_source_release \
-  --epochs 1 --workers 2 --eval-workers 2 --log-every 50
+  --epochs 20 --batch-size 4 --workers 4 --eval-workers 2 --log-every 50 --receiver-ids 0,1
+
 ```
 
 已完成的严格结果/权重：
