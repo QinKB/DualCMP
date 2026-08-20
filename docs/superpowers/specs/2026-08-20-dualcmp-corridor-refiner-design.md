@@ -4,8 +4,8 @@
 
 重建 `dual_source_motion_anchored`，使模型满足以下不可妥协的合同：
 
-1. fused BEV 负责唯一 receiver-centric actor state 与可靠的 base forecast；
-2. source BEV 只提供沿候选未来走廊的增量证据，不得绕过 source evidence 形成第二个无条件 decoder；
+1. fused BEV 负责唯一 receiver-centric actor state；已验证的 actor-source current context、ordered history和motion proposal共同形成可靠base forecast；
+2. source BEV 的新增分支只提供沿候选未来走廊的增量证据，不得绕过 source evidence 形成第二个无条件 decoder；
 3. source 分支关闭、无有效 source、gate 选择 null 或 residual 初始为零时，final distribution 必须逐元素等于 base distribution；
 4. source final loss 不回传 base，但也不能通过多层 loss 平均、全局梯度裁剪或随机数消耗削弱 base 的训练；
 5. source correction 必须具有时间连续性，不能出现 1 s 大跳变而 5 s 修正反而更小的非物理轨迹；
@@ -40,15 +40,13 @@ receiver-aligned multi-CAV LiDAR
         │
         ├── FuseBEVT ──> fused BEV ──> persistent actor state/query
         │                                │
-        │                                └── mature motion proposal core
-        │                                         │
-        │                              physics/cross-mode proposals
-        │                                         │
-        ├── fused BEV corridor sampling ──────────┤
-        │                                         ▼
-        │                                  fused-base GMM
-        │                                         │ detach
-        └── source BEV corridor sampling ─────────┤
+        └── source BEV current patch ────┤
+                                         ▼
+                         mature actor-source motion proposal core
+                                         │
+                              proposal/base GMM (legacy-exact)
+                                         │ detach
+        source BEV trajectory corridor ──┤
                                                   ▼
                                    source selection + null gate
                                                   │
@@ -57,19 +55,19 @@ receiver-aligned multi-CAV LiDAR
                                          final source-refined GMM
 ```
 
-完整模型分三层监督：
+完整模型保留三层监督：
 
-1. `motion_proposal`：成熟 motion-anchored proposal core；
-2. `fused_base`：沿 proposal 读取 fused corridor 后的 base；
-3. `source_final`：沿 detached fused-base corridor 读取 source evidence 后的 final。
+1. `motion_proposal`：成熟 actor-source motion-anchored proposal；
+2. `cross_mode_aux`：旧模型已经验证的训练期cross-mode辅助层；
+3. `source_final`：沿 detached base proposal corridor 读取 source evidence 后的 final。
 
-source-disabled 消融只暴露前两层；full 模型暴露三层。source final 对前两层全部 detach。
+source-disabled 消融逐项复用旧模型的前两层、默认公开proposal；full 模型增加第三层。source final 对前两层全部 detach。
 
 ## 4. 成熟 Motion Proposal Core
 
 ### 4.1 复用边界
 
-v2 首先构造一个 `MotionAnchoredForecastHead` 子模块，并且在任何 v2 随机模块之前构造。这样在相同 seed、相同 `PointPillarColif` 构造顺序下，其参数初始化与 A0 的成熟 head 一致。
+v2 首先构造一个 `MotionAnchoredForecastHead` 子模块，并且在任何 v2 随机模块之前构造。`PointPillarColif`继续执行并训练同一个`ActorConditionedCooperativeFusion`，把geometry-conditioned current source context传给该子模块。这样在相同seed、receiver protocol与构造顺序下，actor-source fusion与motion head的参数、forward和loss均与旧模型一致。
 
 该子模块继续使用：
 
@@ -80,11 +78,16 @@ v2 首先构造一个 `MotionAnchoredForecastHead` 子模块，并且在任何 v
 - six physics motion anchors；
 - proposal 与 cross-mode deep supervision。
 
-v2 不复制或重新解释上述逻辑。它消费 proposal core 已公开的 proposal GMM，后续 corridor modules 作为独立 refinement。
+v2 不复制或重新解释上述逻辑。它消费 proposal core 已公开的proposal GMM，后续source corridor module仅作为独立第三层。
 
-### 4.2 Fused BEV 职责
+### 4.2 旧失败记录约束
 
-proposal core 的 `query_feat` 已由 fused BEV tracker 产生。除此之外，v2 沿 proposal future states 再读取 fused BEV，使 base forecast 能访问 query 压缩后仍保留的空间证据。source BEV 在 fused-base 形成前不参与。
+固定seed一轮实验已验证：`actor-source + ordered history + proposal`整体优于无actor-source，也优于identity-corrected trajectory-source refined；训练期第二层deep supervision略有正则收益，但部署第二层反而更差。因此v2遵循以下边界：
+
+- fused BEV继续通过tracker query提供统一current state；
+- current actor-source context与ordered history保留在base中，不为追求形式对称而删除；
+- proposal仍是base默认公开层；cross-mode只作辅助监督；
+- trajectory corridor只增加第三层，不能替换或削弱已验证base。
 
 ## 5. Trajectory Corridor Sampling
 
@@ -112,7 +115,6 @@ center, +1.5 m normal, -1.5 m normal,
 设 `S=5` corridor samples：
 
 ```text
-fused corridor:  [B,Q,K,T,S,C]
 source corridor: [B,Q,K,T,L,S,C]
 spatial valid:   [B,Q,K,T,S]
 source valid:    [B,Q,K,T,L,S]
@@ -124,42 +126,22 @@ source valid:    [B,Q,K,T,L,S]
 
 新增 `opencood/models/colif/trajectory_corridor.py`：
 
-- `TrajectoryCorridorSampler`：只负责 metric proposal 到 grid、tangent/normal offsets、fused/source sampling 与 validity；
-- `FusedCorridorRefiner`：只负责 fused tokens 到 fused-base GMM residual；
+- `TrajectoryCorridorSampler`：只负责 metric proposal 到 grid、tangent/normal offsets、source sampling 与 validity；
 - `SourceCorridorRefiner`：只负责 per-source tokens、source selection、null gate 与 source final residual。
 
-`dual_source_forecast.py` 只编排 proposal core、两级 corridor refiner、输出与 mask，不继续扩成单个千行模块。
+`dual_source_forecast.py`只编排legacy-exact proposal core、source corridor refiner、输出与mask，不继续扩成单个千行模块。
 
-## 6. Fused Corridor Base Refiner
+## 6. Legacy-Exact Base Contract
 
-### 6.1 State tokens
+source-disabled v2输出直接复用`MotionAnchoredForecastHead`的完整字典，不新增detached duplicate layer。base公开层、proposal/cross-mode loss、intention points、history masks和GMM参数化全部保持旧语义。
 
-proposal GMM 的每个 `(mode,time)` state 由以下信息形成 query：
-
-```text
-[proposal mean(2), log_std(2), rho(1), normalized time(1)]
-    -> point MLP -> D
-```
-
-fused corridor 的五个 samples 经 `fused_projection -> GELU -> LayerNorm`，加入 offset embedding。state query 对五个 samples 做 pre-LN cross-attention，随后使用 temporal Transformer 沿 `T` 建模。
-
-### 6.2 Base correction
-
-fused base 不直接独立输出 50 个 position offsets，而是输出 bounded velocity correction。速度采用向量范数约束，而不是分别截断两个坐标分量：
-
-```text
-delta_v_fused = unit(raw_delta_v) * 4.0 * tanh(||raw_delta_v|| / 4.0)  [m/s]
-delta_mu_fused[t] = cumsum(delta_v_fused * 0.1)[t]
-delta_mu_fused = 6.0 * tanh(delta_mu_fused / 6.0) [m]
-```
-
-log-std、raw-rho 与 mode-logit updates 保持有界。所有 fused correction heads 零初始化，所以 v2 初始化时 fused-base 精确等于 mature proposal。
+base construction发生在source modules之前；source forward包裹在独立RNG fork内；base/source分组裁剪。因此相同seed、输入、receiver顺序和optimizer step下，v2 base-only必须与A0逐元素相同。这个合同先由单元测试和真实首批gradient checksum固定，再允许训练full模型。
 
 ## 7. Source Corridor Refiner
 
 ### 7.1 Source tokens
 
-source sampling 使用 detached fused-base mean 作为 corridor center。每个 token保留 `[K,T,L,S]`，并加入：
+source sampling使用detached legacy proposal mean作为corridor center。每个token保留`[K,T,L,S]`，并加入：
 
 - corridor offset embedding；
 - source origin relative geometry；
@@ -203,7 +185,7 @@ source residual value network不接收 `source_query`、base latent或base traje
 2. 形成 attention query；
 3. 计算 gate 所需的 detached uncertainty。
 
-source/fused evidence contrast、base uncertainty、geometry与age只允许进入 source selection 和 gate。residual value只消费经过 source selection 的 source corridor value tokens，不能消费 fused token、base query或base trajectory embedding。
+base uncertainty、geometry与age只允许进入source selection和gate。residual value只消费经过source selection的source corridor value tokens，不能消费base query、actor-source current context或base trajectory embedding。
 
 source value path采用零保持结构：BEV value projection无bias；time conditioning使用乘法FiLM而非加法position embedding；temporal attention与FFN使用无bias线性层和无affine LayerNorm；最终velocity/log-std/rho/logit heads无bias。由此 `source_context=0` 必然推出全部 source corrections 精确为零，不依赖训练后bias是否漂移。
 
@@ -231,11 +213,10 @@ forecast_loss_layer_names
 forecast_loss_layer_weights
 ```
 
-默认权重：
+默认权重保持旧base不变：
 
 ```text
 motion proposal layers: 0.5, 0.5
-fused base:             1.0
 source final:           1.0  (仅full模型)
 ```
 
@@ -253,15 +234,14 @@ source-disabled 模型完全不输出 detached source-final loss layer。full �
 
 ### 8.3 梯度裁剪隔离
 
-head 提供三个 parameter groups：
+head 提供两个 parameter groups，并把外部actor-source fusion归入base group：
 
 ```text
-motion_core
-fused_base
+actor_source_and_motion_base
 source_refiner
 ```
 
-trainer 在 `GradScaler.unscale_` 后分别计算并裁剪三组 norm，默认上限均为 1000。source gradients不再通过一个全模型 norm缩放 motion/fused base gradients。日志记录每组 pre-clip norm。
+trainer 在 `GradScaler.unscale_` 后分别计算并裁剪两组 norm，默认上限均为 1000。source gradients不再通过一个全模型 norm缩放 actor-source/motion base gradients。日志记录每组 pre-clip norm。
 
 ### 8.4 RNG 隔离
 
@@ -279,12 +259,11 @@ source_selection_weights       [B,Q,K,T,L]
 source_router_weights          [B,Q,K,T,L+1]
 source_velocity_delta          [B,Q,K,T,2]
 source_mean_delta              [B,Q,K,T,2]
-fused_mean_delta               [B,Q,K,T,2]
 ```
 
 训练日志至少记录：
 
-- motion/fused/source gradient norms；
+- actor-source/motion base与source-refiner gradient norms；
 - gate mean、P50、P90；
 - null mean；
 - source selection entropy；
@@ -325,20 +304,21 @@ source_dropout: 0.1
 
 必须先以失败测试固定以下行为：
 
-1. source-disabled layer集合不包含 detached final，base gradient不再为单层的0.5；
-2. full 与 source-disabled 的 motion/fused base gradients在相同输入和RNG下逐元素一致；
-3. 初始 motion proposal=fused base=source final；
-4. all-source masked、forced-null 与 gate=0 时 final逐元素等于base；
-5. 令source context为零且保持任意base query、gate和router weights时，全部source correction严格为零；
-6. source joint permutation保持输出不变；
-7. 不同mode/time可以选择不同source；
-8. corridor sampling位置随proposal trajectory变化，而非固定actor中心；
-9. source correction第一步不超过`source_velocity_limit_mps * frame_period_s`；
-10. integrated position correction等于velocity correction累计积分并保持有限；
-11. final-only loss不回传motion/fused base；base-only loss不回传source；
-12. group-wise clipping不让source norm改变base clipping scale；
-13. invalid actor、空source与越界corridor均无NaN/Inf；
-14. dual-source forecast仍拒绝任何tracking prior mode。
+1. source-disabled layer集合与旧head完全一致且不包含detached final，base gradient不再为单层的0.5；
+2. v2 base-only与A0在相同输入和RNG下输出、motion/actor-source gradients逐元素一致；
+3. full与base-only的base outputs及gradients在相同输入和RNG下逐元素一致；
+4. 初始motion proposal=base=source final；
+5. all-source masked、forced-null 与 gate=0 时 final逐元素等于base；
+6. 令source context为零且保持任意base query、gate和router weights时，全部source correction严格为零；
+7. source joint permutation保持输出不变；
+8. 不同mode/time可以选择不同source；
+9. corridor sampling位置随proposal trajectory变化，而非固定actor中心；
+10. source correction第一步不超过`source_velocity_limit_mps * frame_period_s`；
+11. integrated position correction等于velocity correction累计积分并保持有限；
+12. final-only loss不回传motion base；base-only loss不回传source；
+13. group-wise clipping不让source norm改变base clipping scale；
+14. invalid actor、空source与越界corridor均无NaN/Inf；
+15. dual-source forecast仍拒绝任何tracking prior mode。
 
 ### 11.2 真实数据 smoke
 
@@ -347,16 +327,16 @@ source_dropout: 0.1
 1. 单卡一批 forward、loss、backward、optimizer；
 2. 双卡一批 unused trainable=0、parameter/buffer checksum delta=0；
 3. 双卡连续5批，AMP overflow=0，各gradient group有限；
-4. source-disabled 与 full 在相同seed下首批 motion/fused base输出和梯度一致；
+4. A0、v2 base-only与full在相同seed下首批base输出和梯度一致；
 5. 128帧严格在线评测，gate/null/residual诊断有限且不塌缩。
 
 ## 12. 一轮验收门槛
 
 工程测试通过后，使用与历史一轮结果一致的初始化、seed、receiver IDs、batch、训练样本和metric protocol训练一轮。v2只有同时满足以下条件才进入多seed或长训：
 
-1. source-disabled fused-base 不因loss合同而低于自身 motion proposal；
-2. full source-final 的 minADE/minFDE 在1/3/5 s均不劣于同checkpoint fused-base超过0.01 m；
-3. `minFDE@5s`直接对照历史一轮 `3.427`，不得用不同样本口径替代；
+1. v2 base-only复现旧一轮base结果，minFDE@5s相对3.427差异不超过0.02 m；
+2. full source-final 的minADE/minFDE在1/3/5 s均不劣于同checkpoint base超过0.01 m；
+3. full `minFDE@5s`直接对照历史一轮 `3.427`，不得用不同样本口径替代；
 4. source gate mean位于 `[0.02,0.60]`，null未塌缩；
 5. 1 s source correction P90小于0.6 m，且5 s correction允许大于1 s而不出现反向时间尺度；
 6. partner-only与shared切片至少一个获得正向5 s minADE增益，且另一个退化不超过0.02 m；
