@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from opencood.loss.colif_loss import ColifLoss
 
@@ -99,6 +100,53 @@ def test_phase2_weighted_sum_does_not_require_frozen_aux_detection_losses():
     )
 
 
+def _attach_two_layer_forecast(outputs, base_mean, source_mean, weights):
+    batch, queries = outputs["boxes"].shape[:2]
+    modes, steps = 2, 50
+    base_xy = base_mean.expand(batch, queries, modes, steps, 2)
+    final_xy = (base_mean.detach() + source_mean).expand_as(base_xy)
+    log_std = torch.zeros_like(base_xy)
+    rho = torch.zeros(batch, queries, modes, steps, 1)
+    base_traj = torch.cat((base_xy, log_std, rho), dim=-1)
+    final_traj = torch.cat((final_xy, log_std, rho), dim=-1)
+    scores = torch.zeros(batch, queries, 2, modes, requires_grad=True)
+    outputs.update(
+        {
+            "track_boxes": outputs["boxes"],
+            "track_velocity": outputs["velocity"],
+            "forecast_valid_mask": torch.tensor([[True, False]]),
+            "forecast_frame_heading": torch.zeros(batch, queries),
+            "forecast_loss_in_receiver_frame": True,
+            "pred_scores": torch.full((batch, queries, modes), 0.5),
+            "pred_trajs": final_traj,
+            "loss_pred_scores_layers": scores,
+            "loss_pred_trajs_local_layers": torch.stack(
+                (base_traj, final_traj), dim=2
+            ),
+            "loss_intention_points_layers": torch.stack(
+                (base_xy[..., -1, :], final_xy[..., -1, :]), dim=2
+            ),
+            "forecast_loss_layer_weights": torch.tensor(weights),
+        }
+    )
+
+
+def test_explicit_forecast_layer_weights_do_not_halve_detached_base_gradient():
+    criterion = ColifLoss({})
+    outputs, targets = _frame(0.0)
+    base_mean = torch.tensor(0.5, requires_grad=True)
+    source_mean = torch.tensor(0.0, requires_grad=True)
+    _attach_two_layer_forecast(outputs, base_mean, source_mean, [1.0, 0.0])
+
+    losses, _, _ = criterion.forward_frame(outputs, {}, targets, None)
+    losses["gmm"].backward()
+
+    # Only layer zero is weighted. A blind arithmetic mean produces half of
+    # the single-layer derivative and violates the v2 base contract.
+    assert torch.isclose(base_mean.grad, torch.tensor(50.0), atol=1e-5)
+    assert source_mean.grad is None or torch.count_nonzero(source_mean.grad) == 0
+
+
 def test_newborn_match_does_not_force_distant_local_reference_to_target():
     criterion = ColifLoss({"matcher": {"max_center_distance": 2.0}})
     outputs, targets = _frame(0.0)
@@ -145,3 +193,54 @@ def test_dense_context_future_loss_reaches_packed_mtr_prediction():
     losses["dense_gmm"].backward()
     assert dense.grad is not None
     assert dense.grad.abs().sum() > 0
+
+
+def test_source_availability_uses_matched_target_source_bits():
+    criterion = ColifLoss({"source_availability_weight": 0.5})
+    outputs, targets = _frame(0.0)
+    logits = torch.tensor(
+        [[[0.5, -0.5, 1.0], [9.0, 9.0, 9.0]]], requires_grad=True
+    )
+    outputs["source_availability_logits"] = logits
+    targets["evidence_source_bits"] = torch.tensor([[0b101]])
+    aux = {"cav_mask": torch.tensor([[True, True, True]])}
+
+    losses, counts, _ = criterion.forward_frame(outputs, aux, targets, None)
+    expected = F.binary_cross_entropy_with_logits(
+        logits[0, 0], torch.tensor([1.0, 0.0, 1.0]), reduction="sum"
+    )
+    assert torch.allclose(losses["source_availability"], expected)
+    assert counts["source_availability"] == 3
+    total = criterion.weighted_sum(losses, counts, {"phase": 2})
+    assert torch.allclose(total, expected * 0.5 / 3.0)
+
+
+def test_source_availability_excludes_masked_cavs():
+    criterion = ColifLoss({})
+    outputs, targets = _frame(0.0)
+    logits = torch.tensor(
+        [[[0.5, -50.0, 50.0], [9.0, 9.0, 9.0]]], requires_grad=True
+    )
+    outputs["source_availability_logits"] = logits
+    targets["evidence_source_bits"] = torch.tensor([[0b101]])
+    aux = {"cav_mask": torch.tensor([[True, False, False]])}
+
+    losses, counts, _ = criterion.forward_frame(outputs, aux, targets, None)
+    expected = F.binary_cross_entropy_with_logits(
+        logits[0, 0, :1], torch.ones(1), reduction="sum"
+    )
+    assert torch.allclose(losses["source_availability"], expected)
+    assert counts["source_availability"] == 1
+    losses["source_availability"].backward()
+    assert logits.grad[0, 0, 1:].eq(0).all()
+
+
+def test_source_availability_is_compatible_with_old_outputs():
+    criterion = ColifLoss({})
+    outputs, targets = _frame(0.0)
+
+    losses, counts, _ = criterion.forward_frame(outputs, {}, targets, None)
+    assert counts["source_availability"] == 0
+    assert losses["source_availability"] == 0
+    losses["source_availability"].backward()
+    assert outputs["boxes"].grad is not None

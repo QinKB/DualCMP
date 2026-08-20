@@ -22,6 +22,7 @@ from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.tools import train_utils
 from opencood.tools.colif_train_utils import (
     build_colif_optimizer,
+    clip_forecast_gradient_groups,
     config_sha256,
     configure_trainable_phase,
     load_colif_weights,
@@ -85,6 +86,24 @@ def _arguments():
     parser.add_argument("--disable-temporal-history", action="store_true")
     parser.add_argument("--disable-proposal-refinement", action="store_true")
     parser.add_argument(
+        "--disable-dual-source-refinement",
+        action="store_true",
+        help="Ablate the opt-in source residual while retaining the fused base",
+    )
+    parser.add_argument(
+        "--disable-source-availability-bias",
+        action="store_true",
+        help=(
+            "Keep availability supervision for diagnostics but remove its "
+            "bias from dual-source routing"
+        ),
+    )
+    parser.add_argument(
+        "--forecast-architecture",
+        choices=("motion_anchored", "dual_source_motion_anchored"),
+        help="Explicitly select the released or opt-in DualCMP forecast head",
+    )
+    parser.add_argument(
         "--forecast-refinement-type",
         choices=("cross_mode", "trajectory_source"),
     )
@@ -131,6 +150,49 @@ def _ddp_parameter_sync_report(model, device):
     return {"checked": True, "max_checksum_delta": float(delta)}
 
 
+def _source_health_summary(outputs):
+    required = (
+        "source_gate",
+        "source_router_weights",
+        "source_selection_weights",
+        "source_mean_delta",
+    )
+    if not all(name in outputs for name in required):
+        return None
+    valid = outputs["forecast_valid_mask"].bool()
+    if not bool(valid.any()):
+        return {
+            "forecast_actor_frames": 0,
+            "gate_mean": None,
+            "null_mean": None,
+        }
+    gate = outputs["source_gate"][valid].detach().float().reshape(-1)
+    router = outputs["source_router_weights"][valid].detach().float()
+    selection = outputs["source_selection_weights"][valid].detach().float()
+    source_delta = outputs["source_mean_delta"][valid].detach().float()
+    entropy = -(
+        selection
+        * selection.clamp_min(1e-8).log()
+    ).sum(dim=-1)
+    result = {
+        "forecast_actor_frames": int(valid.sum()),
+        "gate_mean": float(gate.mean()),
+        "gate_p50": float(torch.quantile(gate, 0.5)),
+        "gate_p90": float(torch.quantile(gate, 0.9)),
+        "null_mean": float(router[..., 0].mean()),
+        "source_selection_entropy_mean": float(entropy.mean()),
+    }
+    for label, index in (("1s", 9), ("3s", 29), ("5s", 49)):
+        if source_delta.shape[-2] <= index:
+            continue
+        distance = torch.linalg.vector_norm(source_delta[..., index, :], dim=-1)
+        result["residual_%s_mean_m" % label] = float(distance.mean())
+        result["residual_%s_p90_m" % label] = float(
+            torch.quantile(distance.reshape(-1), 0.9)
+        )
+    return result
+
+
 def _synchronize_ddp_buffers(model, device):
     """Make the frozen/evaluated model identical on every rank.
 
@@ -163,12 +225,26 @@ def main() -> None:
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     hypes = load_yaml(args.hypes_yaml)
     receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
+    if args.forecast_architecture is not None:
+        hypes["model"]["args"]["forecast"]["architecture"] = (
+            args.forecast_architecture
+        )
+        if args.forecast_architecture == "dual_source_motion_anchored":
+            hypes["model"]["args"]["forecast"]["dual_source_version"] = 2
     if args.disable_actor_cooperative_fusion:
         hypes["model"]["args"]["actor_cooperative_fusion"]["enabled"] = False
     if args.disable_temporal_history:
         hypes["model"]["args"]["forecast"]["temporal_history"] = False
     if args.disable_proposal_refinement:
         hypes["model"]["args"]["forecast"]["proposal_refinement"] = False
+    if args.disable_dual_source_refinement:
+        hypes["model"]["args"]["forecast"][
+            "source_refinement_enabled"
+        ] = False
+    if args.disable_source_availability_bias:
+        hypes["model"]["args"]["forecast"][
+            "source_availability_bias_enabled"
+        ] = False
     if args.forecast_refinement_type is not None:
         hypes["model"]["args"]["forecast"]["refinement_type"] = (
             args.forecast_refinement_type
@@ -177,6 +253,9 @@ def main() -> None:
         hypes["model"]["args"]["forecast"]["inference_layer"] = (
             args.forecast_inference_layer
         )
+        hypes["model"]["args"]["forecast"][
+            "dual_source_inference_layer"
+        ] = args.forecast_inference_layer
     if args.observation_score_threshold is not None:
         threshold = float(args.observation_score_threshold)
         if not 0.0 <= threshold <= 1.0:
@@ -598,6 +677,7 @@ def main() -> None:
             epoch_statistics[3] += aux["birth_mask"].sum().double()
 
             gradient_norm = torch.zeros((), device=device)
+            gradient_group_norms = {}
             optimizer_step_skipped = False
             optimizer_step_no_signal = False
             if should_step:
@@ -621,9 +701,8 @@ def main() -> None:
                     )
                     gradients_finite = bool(torch.isfinite(gradient_norm))
                     if gradients_finite:
-                        gradient_norm = torch.nn.utils.clip_grad_norm_(
-                            model.parameters(), max_grad_norm,
-                            error_if_nonfinite=True,
+                        gradient_group_norms = clip_forecast_gradient_groups(
+                            model, max_grad_norm
                         )
                     scale_before = scaler.get_scale()
                     scaler.step(optimizer)
@@ -655,6 +734,7 @@ def main() -> None:
                     "gradient_norm": (
                         float(gradient_norm) if torch.isfinite(gradient_norm) else None
                     ),
+                    "gradient_group_norms": gradient_group_norms,
                     "world_size": world_size,
                     "optimizer_step": bool(should_step),
                     "optimizer_step_skipped": bool(optimizer_step_skipped),
@@ -673,6 +753,7 @@ def main() -> None:
                         else None
                     ),
                     "last_frame_loss_components": last_loss_components,
+                    "source_health": _source_health_summary(outputs),
                 }})
             if args.smoke_batches is not None and batch_index + 1 >= args.smoke_batches:
                 break

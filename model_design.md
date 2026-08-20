@@ -1,5 +1,7 @@
 # CoLIF 最终模型设计与实现合同
 
+> **2026-08-21 更新：** `dual_source_motion_anchored`已重建为v2：逐模块复用已验证的actor-source proposal作为base，沿detached proposal读取mode×time×source trajectory corridor，并把真实source选择与null gate分离。一轮receiver0/1结果base FDE5=`3.4186`、source refined=`3.6102`，因此v2默认部署proposal，refined只保留为负结果诊断。完整合同与结果见`docs/superpowers/specs/2026-08-20-dualcmp-corridor-refiner-design.md`和`HANDOFF.md`顶部。
+
 > **版本：v23，2026-08-13。** 本文件只描述当前可运行模型；已放弃的 source-local、future-feedback 和旧三阶段方案不再混在主设计中，完整历史见 `docs/colif_failure_postmortem.md`。模型保留两个可切换预测出口：整体指标最佳的 actor-source proposal 为默认出口；trajectory-source refinement 为可选完整分支。
 
 ## 1. 论文问题与最终主张

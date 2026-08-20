@@ -34,6 +34,64 @@ def _tracker_modules(model):
     return modules
 
 
+def clip_forecast_gradient_groups(model, max_grad_norm: float) -> dict:
+    """Clip v2 base/source gradients independently and return pre-clip norms."""
+
+    if max_grad_norm <= 0.0:
+        raise ValueError("max_grad_norm must be positive")
+    group_builder = getattr(
+        getattr(model, "forecast_head", None),
+        "gradient_parameter_groups",
+        None,
+    )
+    if group_builder is None:
+        parameters = [
+            parameter
+            for parameter in model.parameters()
+            if parameter.requires_grad and parameter.grad is not None
+        ]
+        if not parameters:
+            return {}
+        norm = torch.nn.utils.clip_grad_norm_(
+            parameters, max_grad_norm, error_if_nonfinite=True
+        )
+        return {"forecast": float(norm.detach())}
+
+    raw_groups = group_builder()
+    groups = {
+        name: [
+            parameter
+            for parameter in parameters
+            if parameter.requires_grad and parameter.grad is not None
+        ]
+        for name, parameters in raw_groups.items()
+    }
+    actor_parameters = [
+        parameter
+        for parameter in model.actor_cooperative_fusion.parameters()
+        if parameter.requires_grad and parameter.grad is not None
+    ]
+    groups.setdefault("base", []).extend(actor_parameters)
+    seen = set()
+    for name, parameters in groups.items():
+        for parameter in parameters:
+            identifier = id(parameter)
+            if identifier in seen:
+                raise ValueError(
+                    "forecast gradient groups overlap at group %s" % name
+                )
+            seen.add(identifier)
+    norms = {}
+    for name, parameters in groups.items():
+        if not parameters:
+            continue
+        norm = torch.nn.utils.clip_grad_norm_(
+            parameters, max_grad_norm, error_if_nonfinite=True
+        )
+        norms[name] = float(norm.detach())
+    return norms
+
+
 def configure_trainable_phase(model, phase: int) -> dict:
     """Apply CoLIF's two-stage optimization contract."""
 
@@ -115,11 +173,16 @@ def configure_trainable_phase(model, phase: int) -> dict:
     else:
         # These projections existed only for the retired latent-content cue.
         # The spatial recurrence consumes explicit GMM means/variances/scores.
-        for name in ("latent_projection", "future_token"):
-            projection = getattr(model.forecast_head, name, None)
-            if projection is not None:
-                for parameter in projection.parameters():
-                    parameter.requires_grad = False
+        forecast_modules = [model.forecast_head]
+        nested_motion_base = getattr(model.forecast_head, "motion_base", None)
+        if nested_motion_base is not None:
+            forecast_modules.append(nested_motion_base)
+        for forecast_module in forecast_modules:
+            for name in ("latent_projection", "future_token"):
+                projection = getattr(forecast_module, name, None)
+                if projection is not None:
+                    for parameter in projection.parameters():
+                        parameter.requires_grad = False
     model.forecast_head.freeze_unused_map_parameters()
     freeze_inactive = getattr(
         model.forecast_head, "freeze_inactive_parameters", None

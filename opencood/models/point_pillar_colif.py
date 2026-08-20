@@ -13,6 +13,7 @@ from opencood.models.point_pillar_cobevt import PointPillarCoBEVT
 from opencood.models.colif import (
     ActorConditionedCooperativeFusion,
     DenseMeasurementProposalGenerator,
+    DualSourceMotionAnchoredForecastHead,
     ForecastMotionPrior,
     FutureAdapter,
     GlobalForecastState,
@@ -132,15 +133,31 @@ class PointPillarColif(nn.Module):
         forecast_args.setdefault(
             "source_bev_dim", int(cooperative_args.get("input_dim", 256))
         )
+        forecast_args.setdefault(
+            "fused_bev_dim", int(cooperative_args.get("input_dim", 256))
+        )
+        forecast_args.setdefault(
+            "patch_radius_m",
+            float(cooperative_args.get("patch_radius_m", 4.0)),
+        )
+        forecast_args.setdefault(
+            "patch_size", int(cooperative_args.get("patch_size", 3))
+        )
         forecast_architecture = str(
             forecast_args.get("architecture", "cmp_mtr")
         )
+        self.forecast_architecture = forecast_architecture
         if forecast_architecture == "cmp_mtr":
             self.forecast_head = PersistentQueryMTRAdapter(
                 self.query_dim, forecast_args
             )
         elif forecast_architecture == "motion_anchored":
             self.forecast_head = MotionAnchoredForecastHead(
+                self.query_dim, forecast_args
+            )
+        elif forecast_architecture == "dual_source_motion_anchored":
+            forecast_args.setdefault("dual_source_version", 2)
+            self.forecast_head = DualSourceMotionAnchoredForecastHead(
                 self.query_dim, forecast_args
             )
         else:
@@ -172,6 +189,17 @@ class PointPillarColif(nn.Module):
                 prior_args.get("proposal_score_weight", 0.25)
             ),
         )
+        if (
+            self.forecast_architecture == "dual_source_motion_anchored"
+            and (
+                str(prior_args.get("mode", "none")) != "none"
+                or self.phase2_future_prior_mode != "none"
+            )
+        ):
+            raise ValueError(
+                "dual-source forecasting is prediction-only and requires "
+                "forecast_motion_prior mode/phase2_mode=none"
+            )
         if self.phase2_future_prior_mode not in ForecastMotionPrior.MODES:
             raise ValueError("Invalid forecast_motion_prior.phase2_mode")
         self.future_prior_modes = int(self.forecast_head.modes)
@@ -589,9 +617,22 @@ class PointPillarColif(nn.Module):
             active_mask[..., None, None], appended, torch.zeros_like(appended)
         )
 
+    def _validate_forecast_prior_contract(self) -> None:
+        if (
+            getattr(
+                self.forecast_head, "uses_dual_source_context", False
+            )
+            and self.forecast_motion_prior.mode != "none"
+        ):
+            raise RuntimeError(
+                "dual-source forecast outputs cannot feed tracking; "
+                "forecast_motion_prior.mode must remain none"
+            )
+
     def _forward_single(
         self, runtime_frame: dict, prev_state=None, run_forecast: bool = True
     ):
+        self._validate_forecast_prior_contract()
         encoded = self.cobevt.encode_fused_bev(runtime_frame)
         fused_bev = encoded["fused_bev"]
         auxiliary_psm = self.cobevt.cls_head(fused_bev)
@@ -682,8 +723,55 @@ class PointPillarColif(nn.Module):
             prev_state.forecast_history_box,
             runtime_frame,
         )
+        uses_dual_source = bool(
+            getattr(
+                self.forecast_head, "uses_dual_source_context", False
+            )
+        )
         if run_forecast and self.forecast_head.enabled:
-            if self.actor_cooperative_fusion_enabled:
+            if uses_dual_source:
+                if self.actor_cooperative_fusion_enabled:
+                    cooperative = self.actor_cooperative_fusion(
+                        encoded["regrouped_source_bev"],
+                        encoded["cav_mask"],
+                        next_state.query_feat,
+                        next_state.ref_box,
+                        next_state.active_mask,
+                        source_to_receiver=runtime_frame.get(
+                            "source_to_receiver"
+                        ),
+                    )
+                else:
+                    cooperative = {
+                        "context": torch.zeros_like(next_state.query_feat),
+                        "attention_weights": next_state.query_feat.new_zeros(
+                            next_state.query_feat.shape[0],
+                            next_state.query_feat.shape[1],
+                            encoded["cav_mask"].shape[1],
+                            self.actor_cooperative_fusion.patch_size ** 2,
+                        ),
+                    }
+                delta_t_s = runtime_frame.get("delta_t_s")
+                if delta_t_s is None:
+                    delta_t_s = fused_bev.new_zeros(
+                        fused_bev.shape[0], encoded["cav_mask"].shape[1]
+                    )
+                forecast = self.forecast_head(
+                    next_state.query_feat,
+                    next_state.ref_box,
+                    next_state.active_mask,
+                    next_state.forecast_history_box,
+                    next_state.history_mask,
+                    next_state.receiver_time_s,
+                    cooperative_context=cooperative["context"],
+                    source_bev=encoded["regrouped_source_bev"],
+                    cav_mask=encoded["cav_mask"],
+                    source_to_receiver=runtime_frame.get(
+                        "source_to_receiver"
+                    ),
+                    delta_t_s=delta_t_s,
+                )
+            elif self.actor_cooperative_fusion_enabled:
                 cooperative = self.actor_cooperative_fusion(
                     encoded["regrouped_source_bev"],
                     encoded["cav_mask"],
@@ -704,26 +792,27 @@ class PointPillarColif(nn.Module):
                         self.actor_cooperative_fusion.patch_size ** 2,
                     ),
                 }
-            source_context_kwargs = {}
-            if getattr(
-                self.forecast_head,
-                "supports_trajectory_source_context",
-                False,
-            ):
-                source_context_kwargs = {
-                    "source_bev": encoded["regrouped_source_bev"],
-                    "cav_mask": encoded["cav_mask"],
-                }
-            forecast = self.forecast_head(
-                next_state.query_feat,
-                next_state.ref_box,
-                next_state.active_mask,
-                next_state.forecast_history_box,
-                next_state.history_mask,
-                next_state.receiver_time_s,
-                cooperative_context=cooperative["context"],
-                **source_context_kwargs,
-            )
+            if not uses_dual_source:
+                source_context_kwargs = {}
+                if getattr(
+                    self.forecast_head,
+                    "supports_trajectory_source_context",
+                    False,
+                ):
+                    source_context_kwargs = {
+                        "source_bev": encoded["regrouped_source_bev"],
+                        "cav_mask": encoded["cav_mask"],
+                    }
+                forecast = self.forecast_head(
+                    next_state.query_feat,
+                    next_state.ref_box,
+                    next_state.active_mask,
+                    next_state.forecast_history_box,
+                    next_state.history_mask,
+                    next_state.receiver_time_s,
+                    cooperative_context=cooperative["context"],
+                    **source_context_kwargs,
+                )
         else:
             cooperative = {
                 "context": torch.zeros_like(next_state.query_feat),
@@ -734,10 +823,17 @@ class PointPillarColif(nn.Module):
                     self.actor_cooperative_fusion.patch_size ** 2,
                 ),
             }
-            forecast = self.forecast_head.empty_outputs(
-                next_state.query_feat,
-                next_state.active_mask,
-            )
+            if uses_dual_source:
+                forecast = self.forecast_head.empty_outputs(
+                    next_state.query_feat,
+                    next_state.active_mask,
+                    source_count=encoded["cav_mask"].shape[1],
+                )
+            else:
+                forecast = self.forecast_head.empty_outputs(
+                    next_state.query_feat,
+                    next_state.active_mask,
+                )
         (
             state_mode_probabilities,
             state_relative_means,
@@ -831,6 +927,40 @@ class PointPillarColif(nn.Module):
             # branches; DDP still discovers truly absent conditional branches.
             "training_anchor": training_anchor,
         }
+        if uses_dual_source:
+            outputs.update(
+                {
+                    "base_pred_scores": forecast["base_pred_scores"],
+                    "base_pred_trajs": forecast["base_pred_trajs"],
+                    "loss_intention_points_layers": forecast[
+                        "loss_intention_points_layers"
+                    ],
+                    "source_router_weights": forecast[
+                        "source_router_weights"
+                    ],
+                    "source_gate": forecast["source_gate"],
+                    "source_selection_weights": forecast[
+                        "source_selection_weights"
+                    ],
+                    "source_velocity_delta": forecast[
+                        "source_velocity_delta"
+                    ],
+                    "source_mean_delta": forecast["source_mean_delta"],
+                    "source_refinement_active": forecast[
+                        "source_refinement_active"
+                    ],
+                    "forecast_loss_layer_weights": forecast[
+                        "forecast_loss_layer_weights"
+                    ],
+                    "forecast_loss_layer_names": forecast[
+                        "forecast_loss_layer_names"
+                    ],
+                }
+            )
+            if self.forecast_head.source_refinement_enabled:
+                outputs["source_availability_logits"] = forecast[
+                    "source_availability_logits"
+                ]
         aux = {
             "fused_bev": fused_bev,
             "source_bev": encoded["source_bev"],

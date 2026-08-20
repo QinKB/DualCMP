@@ -25,6 +25,24 @@ class ColifLoss(nn.Module):
         self.gmm_weight = float(weights.get("gmm", 1.0))
         self.mode_weight = float(weights.get("mode", 1.0))
         self.dense_gmm_weight = float(weights.get("dense_gmm", 1.0))
+        self.source_availability_weight = float(
+            weights.get(
+                "source_availability",
+                args.get("source_availability_weight", 0.1),
+            )
+        )
+        self.source_gate_prior_weight = float(
+            weights.get("source_gate_prior", 0.02)
+        )
+        self.source_velocity_smoothness_weight = float(
+            weights.get("source_velocity_smoothness", 0.05)
+        )
+        self.source_residual_magnitude_weight = float(
+            weights.get("source_residual_magnitude", 0.01)
+        )
+        self.source_gate_prior = float(args.get("source_gate_prior", 0.1))
+        if not 0.0 < self.source_gate_prior < 1.0:
+            raise ValueError("source_gate_prior must lie strictly between zero and one")
         matcher = args.get("matcher", {})
         self.cost_class = float(matcher.get("cost_class", 2.0))
         self.cost_center = float(matcher.get("cost_center", 1.0))
@@ -91,6 +109,44 @@ class ColifLoss(nn.Module):
 
         future_absolute = gt_current_xy + future_from_gt_current
         return future_absolute - track_current_xy
+
+    @staticmethod
+    def _source_availability_loss(outputs, aux, targets, pairs, zero):
+        """Supervise matched queries' per-CAV evidence availability."""
+
+        logits = outputs.get("source_availability_logits")
+        if logits is None or not pairs:
+            reference = logits if logits is not None else outputs["boxes"]
+            return reference.sum() * 0.0, zero.detach().clone()
+
+        cav_mask = aux.get("cav_mask")
+        if cav_mask is None:
+            return logits.sum() * 0.0, zero.detach().clone()
+
+        pair_batch = torch.tensor(
+            [pair[0] for pair in pairs], device=logits.device, dtype=torch.long
+        )
+        pair_query = torch.tensor(
+            [pair[1] for pair in pairs], device=logits.device, dtype=torch.long
+        )
+        pair_target = torch.tensor(
+            [pair[2] for pair in pairs], device=logits.device, dtype=torch.long
+        )
+        matched_logits = logits[pair_batch, pair_query]
+        source_bits = targets["evidence_source_bits"][pair_batch, pair_target].to(
+            device=logits.device, dtype=torch.long
+        )
+        source_slots = torch.arange(logits.shape[-1], device=logits.device)
+        availability_target = (
+            (source_bits.unsqueeze(-1) >> source_slots) & 1
+        ).to(dtype=logits.dtype)
+        valid_slots = cav_mask.to(device=logits.device, dtype=torch.bool)[pair_batch]
+        loss = F.binary_cross_entropy_with_logits(
+            matched_logits, availability_target, reduction="none"
+        )
+        return (loss * valid_slots.to(dtype=loss.dtype)).sum(), valid_slots.sum().to(
+            dtype=logits.dtype
+        )
 
     def _dense_context_future_loss(self, outputs, targets, pairs, zero):
         """Reproduce CMP's per-center dense context-future objective.
@@ -400,6 +456,62 @@ class ColifLoss(nn.Module):
         fused_cls, fused_reg, anchor_count = self._auxiliary_fused_detection(
             outputs, targets
         )
+        source_availability, source_availability_count = (
+            self._source_availability_loss(outputs, aux, targets, pairs, zero)
+        )
+        source_gate_prior = zero
+        source_velocity_smoothness = zero
+        source_residual_magnitude = zero
+        source_regularizer_count = zero.new_zeros(())
+        if bool(outputs.get("source_refinement_active", False)) and all(
+            name in outputs
+            for name in (
+                "source_gate",
+                "source_velocity_delta",
+                "source_mean_delta",
+                "base_pred_scores",
+            )
+        ):
+            prior = zero.new_tensor(self.source_gate_prior)
+            for batch_index, query_index, _ in pairs:
+                if not bool(
+                    outputs["forecast_valid_mask"][batch_index, query_index]
+                ):
+                    continue
+                probability = outputs["base_pred_scores"][
+                    batch_index, query_index
+                ].detach()
+                probability = probability / probability.sum().clamp_min(1e-8)
+                gate = outputs["source_gate"][
+                    batch_index, query_index
+                ].clamp(1e-5, 1.0 - 1e-5)
+                kl = gate * torch.log(gate / prior) + (1.0 - gate) * torch.log(
+                    (1.0 - gate) / (1.0 - prior)
+                )
+                source_gate_prior = source_gate_prior + (probability * kl).sum()
+                velocity = outputs["source_velocity_delta"][
+                    batch_index, query_index
+                ]
+                gated_velocity = gate[:, None, None] * velocity
+                if gated_velocity.shape[-2] > 1:
+                    smooth = F.smooth_l1_loss(
+                        gated_velocity[:, 1:],
+                        gated_velocity[:, :-1],
+                        reduction="none",
+                    ).sum(dim=-1).mean(dim=-1)
+                    source_velocity_smoothness = (
+                        source_velocity_smoothness
+                        + (probability * smooth).sum()
+                    )
+                displacement = torch.linalg.vector_norm(
+                    outputs["source_mean_delta"][batch_index, query_index],
+                    dim=-1,
+                ).mean(dim=-1) / 4.0
+                source_residual_magnitude = (
+                    source_residual_magnitude
+                    + (probability * displacement).sum()
+                )
+                source_regularizer_count = source_regularizer_count + 1.0
         match_count = torch.tensor(float(len(pairs)), device=device, dtype=dtype)
         query_count = torch.tensor(
             float(outputs["exist_logits"].numel()), device=device, dtype=dtype
@@ -413,6 +525,10 @@ class ColifLoss(nn.Module):
             "velocity": velocity_sum,
             "aux_existence": aux_exist_sum,
             "aux_box": aux_box_sum,
+            "source_availability": source_availability,
+            "source_gate_prior": source_gate_prior,
+            "source_velocity_smoothness": source_velocity_smoothness,
+            "source_residual_magnitude": source_residual_magnitude,
         }
         count_dict = {
             "fused_cls": anchor_count,
@@ -422,6 +538,10 @@ class ColifLoss(nn.Module):
             "velocity": match_count.clamp_min(1.0),
             "aux_existence": query_count * decoder_layer_count,
             "aux_box": match_count.clamp_min(1.0) * decoder_layer_count,
+            "source_availability": source_availability_count,
+            "source_gate_prior": source_regularizer_count,
+            "source_velocity_smoothness": source_regularizer_count,
+            "source_residual_magnitude": source_regularizer_count,
             "matched": match_count,
         }
         if matched_scores:
@@ -449,15 +569,41 @@ class ColifLoss(nn.Module):
                 )
                 for layer_index in range(layer_count)
             ]
-            # Deep-supervise both the motion proposal and auxiliary cross-mode
-            # refinement, then average layers.  Runtime may intentionally serve
-            # the proposal layer when the refinement hurts endpoint accuracy.
+            raw_weights = outputs.get("forecast_loss_layer_weights")
+            if raw_weights is None:
+                layer_weights = scores_by_actor.new_full(
+                    (layer_count,), 1.0 / float(layer_count)
+                )
+            else:
+                layer_weights = torch.as_tensor(
+                    raw_weights,
+                    dtype=scores_by_actor.dtype,
+                    device=scores_by_actor.device,
+                )
+                if layer_weights.shape != (layer_count,):
+                    raise ValueError(
+                        "forecast_loss_layer_weights must match layer count"
+                    )
+                if not torch.isfinite(layer_weights).all():
+                    raise ValueError("forecast layer weights must be finite")
+                if (layer_weights < 0.0).any() or not bool(
+                    layer_weights.sum() > 0.0
+                ):
+                    raise ValueError(
+                        "forecast layer weights must be non-negative and nonzero"
+                    )
             loss_dict["gmm"] = torch.stack(
-                [item["gmm"] for item in layer_losses]
-            ).mean()
+                [
+                    layer_weights[index] * item["gmm"]
+                    for index, item in enumerate(layer_losses)
+                ]
+            ).sum()
             loss_dict["mode"] = torch.stack(
-                [item["mode"] for item in layer_losses]
-            ).mean()
+                [
+                    layer_weights[index] * item["mode"]
+                    for index, item in enumerate(layer_losses)
+                ]
+            ).sum()
             count_dict["gmm"] = layer_losses[-1]["gmm_count"]
             count_dict["mode"] = layer_losses[-1]["mode_count"]
         else:
@@ -501,6 +647,22 @@ class ColifLoss(nn.Module):
                 "gmm", "mode", "dense_gmm",
             ),
         }[phase]
+        if (
+            phase == 2
+            and "source_availability" in loss_dict
+            and "source_availability" in count_dict
+        ):
+            names = (*names, "source_availability")
+        source_regularizers = (
+            "source_gate_prior",
+            "source_velocity_smoothness",
+            "source_residual_magnitude",
+        )
+        if phase == 2 and all(
+            name in loss_dict and name in count_dict
+            for name in source_regularizers
+        ):
+            names = (*names, *source_regularizers)
         global_counts = torch.stack(
             [count_dict[name].detach().float() for name in names]
         )
@@ -532,6 +694,19 @@ class ColifLoss(nn.Module):
             + self.mode_weight * norm("mode")
             + self.dense_gmm_weight * norm("dense_gmm")
         )
+        if "source_availability" in count_by_name:
+            forecast = forecast + self.source_availability_weight * norm(
+                "source_availability"
+            )
+        if "source_gate_prior" in count_by_name:
+            forecast = (
+                forecast
+                + self.source_gate_prior_weight * norm("source_gate_prior")
+                + self.source_velocity_smoothness_weight
+                * norm("source_velocity_smoothness")
+                + self.source_residual_magnitude_weight
+                * norm("source_residual_magnitude")
+            )
         recurrence_mode = str(
             (phase_cfg or {}).get(
                 "future_prior_mode",

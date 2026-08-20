@@ -1,5 +1,51 @@
 # HANDOFF
 
+## 2026-08-21 DualCMP v2完整修复、receiver0/1一轮训练与验收
+
+- 已确认`--receiver-ids 0,1`不是日志装饰：入口写入`fusion.args.receiver_ids`，`ColifSequenceDataset`据此为每个`(scene,receiver)`构造独立clip。旧release为3420 train records/3986 test frames；A0--A3此前只用`[0]`，为1710/1993。本轮v2恢复`[0,1]`。
+- v1根因已由代码与只读实验确认：detached final参与layer mean使base gradient精确减半；source residual可绕过source context；reader只读当前patch而非future corridor；null与source共softmax后source mass塌到99.04%；独立50点position residual产生1s大跳变。
+- 新增`trajectory_corridor.py`：沿proposal全部50步采样center/左右/前后五个metric offsets；为控制11帧recurrent graph显存，五点逐offset采样并立即有效池化，语义不减但峰值显存约降5倍。source value path为zero-preserving，source context为0时correction严格为0。
+- `DualSourceMotionAnchoredForecastHead` v2首先构造并包装原`MotionAnchoredForecastHead`，继续使用同一`ActorConditionedCooperativeFusion`、ordered history、proposal/cross-mode deep supervision。source final沿detached proposal corridor读取per-source BEV，真实source内softmax与mode-level null gate分离，gate初值0.1，mean residual由norm-bounded velocity积分形成。
+- loss不再盲目平均任意layers：legacy base保持`[0.5,0.5]`；full增加detached source layer权重1.0。增加gate prior、velocity smoothness和residual magnitude regularizer。base/source分别裁剪gradient norm，source不再通过全局clip缩放base。source stochastic forward使用RNG fork，不改变下一帧base dropout序列。
+- 工程验收：完整`tests/colif`为152 passed、29个已知warning；compileall和`git diff --check`通过。单卡full/base一批均unused trainable=0；双卡5批0 overflow、parameter/buffer checksum delta0。batch4与batch2在五点未池化版本分别OOM；池化后batch2可运行，正式使用batch2×grad-accum2保持全局batch8与428 updates。
+- 正式一轮目录：`opencood/logs/dualcmp_v2_full_receiver01_seed20_1e_20260820`。训练3420 samples、1710 global micro-batches、428 updates、0 overflow、0 no-signal skip、parameter/buffer checksum delta0；末步base/source gradient norms=271.68/205.09，gate mean=0.423、null=0.577，1s/5s residual P90=0.433/1.727m。
+- 同checkpoint historical `online_masked`完整3986帧：base/proposal ADE1/3/5=`1.087292/1.710151/2.196897`，FDE=`1.341922/2.408021/3.418646`；旧一轮为ADE5/FDE5=`2.204593/3.427314`，因此base分别改善0.007696/0.008669m并达到“至少相当”门槛。tracking完全一致：MOTA=0.650443、coverage=0.804925、actor_count5=52597。
+- source refined同协议ADE=`1.162110/1.893579/2.416628`、FDE=`1.472007/2.735892/3.610183`，全面劣于base，按预设验收规则拒绝部署。当前代码读取该checkpoint时严格0 missing/0 unexpected、`dual_source_version=2`、`receiver_ids=[0,1]`，默认`inference_layer=proposal`；refined仅保留为显式诊断负结果。
+- corrected `cmp_fixed` base完整32833 actor结果：ADE=`1.124331/1.721913/2.273080`，FDE=`1.355648/2.300019/3.470410`，MR@2m=`0.189200/0.296683/0.320501`。不得与historical online-masked 3.427混报。
+
+## 2026-08-20 DualCMP A1/A2 一轮结果与 source-router 根因诊断
+
+- A1/A2 已完成同口径 full test：V2V4Real test、receiver 0、strict-online、`cmp_fixed`、完整 5 s future、15,873 个 actor。A2 refined 相对 A1 的 minADE@1/3/5s 分别增加 0.065/0.085/0.076 m，minFDE 增加 0.097/0.016/0.036 m，MR@2m 增加 3.70/1.41/0.13 个百分点；方向一致为退化，不能表述为 source residual 已带来收益。
+- 使用同一 A2 checkpoint 显式切换到 proposal/base 完整重评后，六个 ADE/FDE 与 A1 的差异均不超过 0.006 m。A2 refined 相对自身 base 的 minADE@1/3/5s 分别恶化 0.066/0.088/0.079 m，minFDE 恶化 0.100/0.021/0.036 m；因此退化已定位到 source residual 的净作用，而不是 tracking、样本集合或 fused-base。
+- 对 A2 checkpoint 做了只读 300 帧严格在线顺序抽样，共 5,610 个有效 forecast actor frames、每帧两个有效 CAV。mode-level source mass 平均 99.04%、中位数 99.17%，null 平均仅 0.96%；mode-probability 加权端点残差位移均值在 1/3/5s 为 0.359/0.383/0.183 m，1s P90 为 1.462 m。当前 router 已退化成几乎无条件开启 residual，不是选择性使用 source。
+- receiver-only、partner-only、shared、age 2--3 四个 5s minADE 切片全部退化 0.092/0.110/0.051/0.124 m，没有发现由单一小切片拖累整体的证据。A3 仅关闭 `availability_weight_beta`，而当前 beta 约 0.1、主要 failure 是 null 概率塌缩，因此 A3 只能作确认性消融，不能作为当前根因修复。
+- 新增 `docs/dualcmp_a1_a2_diagnostic_snapshot.json`，保存输入文件、完整主指标、派生差值、训练摘要和 router 抽样口径；JSON parse 与 `git diff --check` 通过。Data Analytics 技术报告已通过 artifact validator 并成功渲染。
+- 当前结论边界：只有单 seed、单 epoch；router 是 300 帧机制抽样。证据足以否决直接把当前 A2/A3 扩到长训，但不能证明修正后的 dual-source 结构或更长训练永远无效。下一实现应优先把 residual enable gate 与 source 内分配拆开，并在任何新长训前记录 null/source mass 和残差位移分布。
+
+## 2026-08-19 DualCMP fused-base/source-residual opt-in 实现
+
+- 新增 `opencood/models/colif/dual_source_forecast.py`，实现串行 `forecast query -> mode-conditioned fused-BEV read -> base GMM -> detached base trajectory query -> per-mode/per-source local read -> availability/relevance/null routing -> zero-init bounded GMM residual`。source 维保留到 `[B,Q,K,L,D]` reader 输出后才在 router 消去；没有 fixed source-slot embedding，forecast 不写回 tracker。
+- 新 head 使用 pre-LN attention、显式 GELU、LayerNorm 和 0.1 hidden/attention dropout；router logits/softmax不做普通 dropout，source branch单独使用0.1 source dropout且允许精确 null。null value为0，所有 residual 乘`1-alpha_null`；base distribution与latent均detach，final loss不改变base proposal。
+- GMM residual分别更新 mean、log-std、raw-rho和mode logits；保持`rho=0.5*tanh(raw_rho)`。final residual heads全部零初始化，初始化及强制null时base/final逐元素相等。
+- `PointPillarColif` 新增 `dual_source_motion_anchored` architecture并传入 fused/source BEV、CAV mask、source transform和`delta_t_s`；旧 actor-source reader继续实例化以兼容checkpoint，但新architecture下不执行、不训练。默认YAML仍是released `motion_anchored`，CLI `--forecast-architecture dual_source_motion_anchored`才启用；`--disable-dual-source-refinement`提供fused-base消融。
+- `ColifLoss`新增matched actor×CAV availability BCE：从`evidence_source_bits`解bit target，仅统计`cav_mask`有效slot，按raw numerator/count参与DDP归一；Phase-2权重默认0.1。availability只表示当前source evidence support，不被命名为forecast relevance。
+- 兼容验证：旧epoch-9 Phase-2 checkpoint strict load为0 missing/0 unexpected、仍为`MotionAnchoredForecastHead + proposal`；新head可从现有Phase-1 checkpoint加载406个current-state keys并保留240个forecast/compatibility初始化项。
+- 实际验证：新head专项测试含identity、forced-null、masked source、source permutation、mode routing、base/final梯度隔离、source dropout、短历史availability、fused-base freeze、消融RNG一致性及tracking-prior拒绝；完整`tests/colif`为145 passed、32 warnings。真实V2V4Real单卡一批完成forward/backward/optimizer，unused trainable=0、AMP overflow=0。双卡一批及5批稳定性smoke均unused trainable=0、parameter/buffer checksum delta=0、AMP overflow=0；5批gradient norm为40.74/106.91/737.05/37.38/51.28，均低于Phase-2 clip 1000。
+- `/tmp/dualcmp-stability.Kv6iif/checkpoint_epoch_000.pth`是5-step smoke checkpoint，仅用于通路验证。独立strict-online evaluator两帧已完成且正确记录`checkpoint_inference_layer=refined`、无diagnostic override；两帧指标没有统计意义，不能写入论文或主表。
+- fused-base-only 单卡一批消融同样完成，trainable参数从6,941,689降为4,627,451、unused trainable=0、`source_availability=0`。同初始化的full/base smoke具有相同GMM与mode初值；禁用source时仍执行冻结source随机路径并强制null，保证跨帧dropout RNG序列不因跳支路而改变。
+- 终审修复两项P1：所有dual opt-in超参数已从默认YAML移除并由代码默认/CLI提供，因此released配置hash不再因候选字段变化；旧模型仍需使用与原训练相同的receiver/phase/epoch等CLI参数resume。Dual architecture在构造和每次forward均强制`forecast_motion_prior.mode/phase2_mode=none`，从结构上拒绝任何forecast-to-tracker反馈实验。
+- 尚未完成：正式一轮/多seed训练、完整official test、A0--A5容量匹配消融、router calibration、latency/参数量/FLOPs。当前实现通过不等于方法有效。
+
+## 2026-08-19 DualCMP 双源职责重审与 evaluator 出口修复
+
+- 重新激活 Serena 并核对当前完整链路：默认模型仍是 `state query -> flat source×patch attention -> actor context`，完整 history/motion/actor interaction 在 source 压缩后进入 forecast head；默认所有 mode 共用同一 cooperative context。
+- 使用本地 PaperMeld 原文及作者代码复核 CMP、V2X-Graph、Co-MTP、CoPAD、V2XPnP、MTR、QCNet、TransFusion、ObjectFusion、IS-Fusion、INSTINCT、SparseCoop 和 LoGoNet。关键边界：没有现成方法同构实现 `single fused tracker + per-source LiDAR BEV + mode-conditioned source routing`；下一版只能作为组合性可证伪假设，不能写成复刻既有方法。
+- 新增 `docs/dualcmp_dual_source_design.md`。推荐分工为：`fused_bev` 维护唯一 current state 并提供 base forecast context；`regrouped_source_bev` 只在 actor/mode query 已形成后提供 source-attributed residual evidence。新设计包含 fused-only base GMM、per-mode per-source local reader、visibility/geometry/age quality、null route 和零初始化 source residual；不允许 forecast 写回 tracker。
+- 一度加入但未启用的 `hierarchical_forecast/forecast_query` 草案在参考审计后被判定仍缺 fused prediction reader、mode-level routing、null path 和质量监督，已完整撤销；三个模型文件恢复到任务开始时的 tracked 内容，当前没有遗留候选模型行为变化。
+- 发现并修复独立 evaluator correctness 问题：`eval_colif_v2v4real.py` 原先默认把 checkpoint 的 `inference_layer=proposal` 静默覆盖为 `refined`。现在默认 `checkpoint`，仅显式 diagnostic 参数才覆盖；metrics 记录 checkpoint/effective layer 与 override 状态。新增入口回归测试，`tests/colif/test_receiver_protocol.py` 为 12 passed。
+- 现有 `checkpoint_epoch_009.pth` 保存的是 `cross_mode + proposal`，但历史 `metrics_test_cmp_fixed_epoch009.json` 明确记录 `diagnostic_forecast_layer=refined`；该 JSON 只能标为 refined diagnostic，不能作为 checkpoint 默认 proposal 部署指标。尚未重跑完整 proposal/refined 评测。
+- 本轮没有运行新模型训练或昂贵评测；历史 source/trajectory-source 数字不能证明新设计。下一步应先实现 opt-in 新 head 和 A0--A5 容量匹配消融，再更新论文方法与结论。
+
 ## 2026-08-19 修改模型代码前的Git恢复点
 
 - 当前所有已跟踪代码、配置和文档将以`dualcmp-pre-code-change-20260819`标签保存，作为下一轮模型代码修改前的恢复点。

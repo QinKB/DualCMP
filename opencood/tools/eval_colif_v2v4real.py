@@ -87,14 +87,41 @@ def _arguments():
     parser.add_argument("--diagnostic-disable-temporal-history", action="store_true")
     parser.add_argument(
         "--diagnostic-forecast-layer",
-        choices=("refined", "proposal"),
-        default="refined",
+        choices=("checkpoint", "refined", "proposal"),
+        default="checkpoint",
+        help=(
+            "Diagnostic-only output-layer override. By default, preserve the "
+            "inference layer stored in the checkpoint configuration."
+        ),
     )
     parser.add_argument(
         "--diagnostic-residual-prototypes",
         help="Train-only JSON produced by audit_motion_prototypes",
     )
     return parser.parse_args()
+
+
+def _apply_forecast_layer_override(forecast_head, requested_layer: str) -> dict:
+    """Apply an explicit diagnostic override without changing the default model."""
+
+    has_layer = hasattr(forecast_head, "inference_layer")
+    checkpoint_layer = (
+        str(forecast_head.inference_layer) if has_layer else "refined"
+    )
+    overridden = requested_layer != "checkpoint"
+    if overridden:
+        if not has_layer and requested_layer != "refined":
+            raise ValueError("checkpoint forecast head has no proposal layer")
+        if has_layer:
+            forecast_head.inference_layer = requested_layer
+    effective_layer = (
+        str(forecast_head.inference_layer) if has_layer else "refined"
+    )
+    return {
+        "checkpoint_inference_layer": checkpoint_layer,
+        "effective_inference_layer": effective_layer,
+        "diagnostic_forecast_layer_override": overridden,
+    }
 
 
 def main():
@@ -138,10 +165,9 @@ def main():
         if not hasattr(model.forecast_head, "temporal_history_enabled"):
             raise ValueError("checkpoint forecast head has no temporal-history branch")
         model.forecast_head.temporal_history_enabled = False
-    if hasattr(model.forecast_head, "inference_layer"):
-        model.forecast_head.inference_layer = args.diagnostic_forecast_layer
-    elif args.diagnostic_forecast_layer != "refined":
-        raise ValueError("checkpoint forecast head has no proposal layer")
+    forecast_layer_report = _apply_forecast_layer_override(
+        model.forecast_head, args.diagnostic_forecast_layer
+    )
     mtr_reload_report = None
     if args.diagnostic_reload_mtr_checkpoint:
         model.forecast_head.enabled = True
@@ -222,7 +248,12 @@ def main():
         "diagnostic_temporal_history_disabled": bool(
             args.diagnostic_disable_temporal_history
         ),
-        "diagnostic_forecast_layer": args.diagnostic_forecast_layer,
+        "diagnostic_forecast_layer": (
+            None
+            if args.diagnostic_forecast_layer == "checkpoint"
+            else args.diagnostic_forecast_layer
+        ),
+        **forecast_layer_report,
         "diagnostic_residual_prototypes": (
             str(Path(args.diagnostic_residual_prototypes).resolve())
             if args.diagnostic_residual_prototypes else None

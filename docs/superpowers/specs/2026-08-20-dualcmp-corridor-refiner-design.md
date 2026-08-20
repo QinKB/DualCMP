@@ -115,12 +115,13 @@ center, +1.5 m normal, -1.5 m normal,
 设 `S=5` corridor samples：
 
 ```text
-source corridor: [B,Q,K,T,L,S,C]
+source corridor grid: [B,Q,K,T,S,2]
+pooled source evidence: [B,Q,K,T,L,C]
 spatial valid:   [B,Q,K,T,S]
-source valid:    [B,Q,K,T,L,S]
+source valid:    [B,Q,K,T,L]
 ```
 
-`grid_sample(..., align_corners=False, padding_mode="zeros")` 与现有 BEV 合同一致。越界 grid、无效 CAV 与显式 source mask 均在 softmax 前 hard-mask。
+`grid_sample(..., align_corners=False, padding_mode="zeros")` 与现有 BEV 合同一致。五个offset逐个采样并立即按有效点池化，避免在11帧recurrent graph中保留完整`[T,L,S,C]`张量；五点空间覆盖不变，峰值显存约降5倍。越界grid、无效CAV与显式source mask均在softmax前hard-mask。
 
 ### 5.3 模块边界
 

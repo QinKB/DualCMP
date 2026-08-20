@@ -1,9 +1,23 @@
+from types import SimpleNamespace
+
+import pytest
 import torch
+import torch.nn as nn
 
 from opencood.models.colif.forecast_motion_prior import ForecastMotionPrior
 from opencood.models.colif.measurement_state_update import MeasurementStateUpdate
 from opencood.models.colif.state import GlobalForecastState
 from opencood.models.point_pillar_colif import PointPillarColif
+
+
+def test_dual_source_forecast_rejects_tracking_feedback_modes() -> None:
+    model = PointPillarColif.__new__(PointPillarColif)
+    nn.Module.__init__(model)
+    model.forecast_head = SimpleNamespace(uses_dual_source_context=True)
+    model.forecast_motion_prior = SimpleNamespace(mode="association")
+
+    with pytest.raises(RuntimeError, match="cannot feed tracking"):
+        model._validate_forecast_prior_contract()
 
 
 def _inputs(probabilities=None, valid=True, requires_grad=False):

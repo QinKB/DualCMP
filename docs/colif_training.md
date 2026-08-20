@@ -114,6 +114,54 @@ MOTA=0.6333, forecast coverage=0.7894
 
 ## 5. 公平消融命令
 
+### DualCMP v2：legacy-exact base + source corridor refiner
+
+v2 保留已验证的 geometry-conditioned actor-source proposal 作为默认公开层，并沿 detached proposal 在每张 source BEV 采样五点trajectory corridor。source final使用独立null gate和速度积分residual；训练后若refined未超过base，必须部署proposal，不能隐藏负结果。
+
+```bash
+ulimit -n 65536
+CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --forecast-architecture dual_source_motion_anchored \
+  --init-colif-checkpoint \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/dualcmp_v2_full_receiver01_seed20_1e_20260820 \
+  --epochs 1 --batch-size 2 --grad-accum-steps 2 \
+  --workers 2 --eval-workers 2 --log-every 50 \
+  --receiver-ids 0,1 --forecast-metric-protocol online_masked
+```
+
+五点corridor使每卡batch4在24GB RTX3090上OOM；batch2累积2保持历史协议相同的全局batch8、3420样本和428 optimizer updates。
+
+已完成checkpoint：
+
+```text
+opencood/logs/dualcmp_v2_full_receiver01_seed20_1e_20260820/checkpoint_epoch_000.pth
+```
+
+同checkpoint historical `online_masked`：
+
+```text
+proposal/base: ADE1/3/5=1.0873/1.7102/2.1969, FDE1/3/5=1.3419/2.4080/3.4186
+source refined: ADE1/3/5=1.1621/1.8936/2.4166, FDE1/3/5=1.4720/2.7359/3.6102
+```
+
+旧一轮FDE5为3.4273；v2 base为3.4186。source refined总体退化，已拒绝作为默认层。checkpoint在当前代码下默认`inference_layer=proposal`，显式诊断refined使用：
+
+```bash
+--diagnostic-forecast-layer refined
+```
+
+source-disabled训练消融在同一命令增加：
+
+```bash
+--disable-dual-source-refinement
+```
+
+正式比较必须从同一 Phase-1 checkpoint、相同初始化state、seed、updates、receiver协议与target population开始。不能将本节候选与下方旧消融的单次结果直接混报。
+
 关闭 actor-source fusion：
 
 ```bash

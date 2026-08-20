@@ -37,7 +37,7 @@
 
 **Files:** Create `opencood/models/colif/trajectory_corridor.py`; create `tests/colif/test_trajectory_corridor.py`.
 
-**Interfaces:** `TrajectoryCorridorSampler.forward(source_bev, actor_boxes, proposal_mean, cav_mask)` returns samples `[B,Q,K,T,L,5,C]`, valid `[B,Q,K,T,L,5]`, grid `[B,Q,K,T,5,2]`.
+**Interfaces:** `TrajectoryCorridorSampler.forward(source_bev, actor_boxes, proposal_mean, cav_mask)` samples five offsets sequentially and returns pooled evidence `[B,Q,K,T,L,C]`, valid `[B,Q,K,T,L]`, grid `[B,Q,K,T,5,2]`.
 
 - [ ] Write failing shape, curved-tangent, yaw-fallback, source-mask and out-of-range tests.
 - [ ] Run the new test and require an import failure because the sampler does not exist.
