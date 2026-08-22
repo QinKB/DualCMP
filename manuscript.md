@@ -258,27 +258,97 @@ where \(w_l\) is the loss weight of layer \(l\). The motion proposal and cross-m
 
 Freezing the current-state modules in Phase 2 gives all motion prediction variants the same agent queries, boxes, and prediction coverage. During inference, DualCMP processes each receiver sequence in time order, resets the query state at scene boundaries, and predicts trajectories without ground-truth annotations or precomputed tracking trajectories.
 
-## V. Current Experimental Evidence
+## V. Experiments
 
-### A. Controlled Ablation Protocol
+The experiments address five questions: (1) how DualCMP compares with motion and cooperative-prediction baselines under the same online protocol; (2) whether retaining per-CAV BEV features improves forecasting over using only the fused BEV; (3) which parts of agent-specific CAV feature fusion contribute to the result; (4) which agents benefit from cooperative evidence and how the system behaves when partner observations are missing; and (5) what computational cost is introduced by the second BEV representation. Blank cells in the tables denote measurements for which no verified result is currently available.
 
-All three DualCMP variants below load the same Phase-1 epoch-1 checkpoint, use seed 20, train Phase 2 for exactly one epoch on the official V2V4Real train split, and evaluate the fixed final checkpoint on the official test split. The data-loader generator and worker seeds are explicit; previously, model-construction RNG could alter point-shuffle order between ablations. Each run contains 855 optimizer steps with two GPUs, zero AMP overflow, zero no-signal skip, and zero cross-rank parameter-checksum delta. All variants produce identical MOTA, forecast coverage, and actor counts.
+### A. Experimental Setup
 
-| Forecast configuration | minADE at 1/3/5 s (m) | minFDE at 1/3/5 s (m) | MOTA | Coverage |
-| --- | --- | --- | ---: | ---: |
-| No actor-source fusion | 1.1189 / 2.0404 / 2.7437 | 1.5749 / 3.0895 / 4.3980 | 0.6333 | 0.7894 |
-| Actor-source, no ordered history | 1.0504 / 1.9313 / 2.6535 | 1.4608 / 2.9931 / 4.3827 | 0.6333 | 0.7894 |
-| **Actor-source + ordered history (default)** | **0.9997 / 1.8472 / 2.5870** | **1.3708 / 2.9177 / 4.3804** | **0.6333** | **0.7894** |
+**Dataset and protocol.** We evaluate DualCMP on V2V4Real \cite{xu2023v2v4real}. The local official partition contains 32 training sequences and 9 test sequences. Both vehicles are alternately treated as the receiver, producing 3,420 receiver-centric training clips and 3,986 test frames. The query state is reset at every scene--receiver boundary. At time \(t\), the model receives only the LiDAR observations, poses, and timestamps available up to \(t\); annotation identities, ground-truth boxes, and future trajectories are not passed to the model. We retain at most 11 states sampled at 10 Hz and predict 50 future steps, corresponding to a 1-s observation span and a 5-s prediction horizon. A query becomes eligible for forecasting after two valid observations.
 
-The default model improves every reported ADE/FDE over the no-source variant. Its strongest effects occur at 1 and 3 s: minFDE decreases by 12.96% and 5.56%, respectively. Ordered history provides a further 6.16% and 2.52% minFDE reduction at 1 and 3 s relative to actor-source fusion without temporal ordering. The 5-s endpoint differences are small, although minADE over the complete 5-s trajectory improves by 5.71% over no-source fusion and 2.50% over no ordered history.
+**Evaluation metrics.** Each method predicts up to six trajectories. We report \(\operatorname{minADE}_{6}\) and \(\operatorname{minFDE}_{6}\) at 1, 3, and 5 s, where lower values indicate better performance. Under the online-masked protocol, ADE is averaged over the valid future positions within the requested horizon, and FDE is evaluated at the last valid position no later than that horizon. We also report the miss rate with a 2-m endpoint threshold, MOTA, center-based MOTP, tracking precision and recall, and forecast coverage. Forecast coverage is the fraction of target actor frames that are matched to an active query with a valid forecast. Complete scene--receiver timelines are assigned to one evaluation rank, and raw metric sums and counts are reduced across ranks before normalization.
 
-### B. CMP Reference Boundary
+**Implementation details.** The PointPillar and FuseBEVT modules are initialized from the released CMP CoBEVT checkpoint \cite{wang2025cmp}. We first train the fused-BEV persistent tracker and then freeze all current-state modules. In Phase 2, the agent-specific CAV fusion and motion decoder are trained for 20 epochs with AdamW, an initial learning rate of \(10^{-4}\), a weight decay of \(10^{-4}\), and cosine decay after a two-epoch warm-up. Training uses two NVIDIA RTX 3090 GPUs, two clips per GPU, gradient accumulation over two iterations, mixed precision, and an effective batch size of eight. All controlled ablations load the same Phase-1 checkpoint and use identical receiver sets, data-order seeds, optimization steps, and forecast target masks. The current verified run uses seed 20. The final comparison will use seeds 20, 42, and 2026 and report the mean and standard deviation. Checkpoints are fixed by training epoch rather than selected by test performance; the current 20-epoch run uses the final checkpoint.
 
-The locally reproduced CMP no-aggregation checkpoint reports minADE/minFDE of 4.4001/7.5559 m at 5 s, whereas default DualCMP reports 2.5870/4.3804 m. These values are numerically lower by 41.21% and 42.03%, respectively, but the protocols are not directly equivalent. The audited CMP cache filters detections through ground-truth IoU matching, carries ground-truth identity into tracking, and evaluates a different fixed-history target population. Accordingly, the current manuscript reports this comparison as a reproduced numerical reference, not as a protocol-matched state-of-the-art claim.
+### B. Comparison with Existing Methods
 
-### C. Supported and Unsupported Claims
+We use two deterministic motion baselines on the same online tracks. Online CV extrapolates the current tracked velocity, whereas Multiscale Anchors uses the six speed scales in Section IV-E without learned residuals. We additionally plan two learned baselines. MTR \cite{shi2022mtr} is retrained from the same persistent-query histories instead of directly transferring weights trained on smoothed offline tracks. CMP \cite{wang2025cmp} is evaluated only after its detection, tracking, target selection, and forecasting outputs have been adapted to the same strict-online evaluator; values obtained from its ground-truth-filtered tracking cache are not inserted into Table I.
 
-The completed ablations support the following statement: retaining aligned CAV features for agent-specific forecasting improves short- and mid-horizon trajectory accuracy beyond using only the persistent agent state, and ordered motion history provides an additional gain while tracking output remains fixed. They do not support two stronger statements: that one observation is sufficient for reliable long-horizon forecasting or that predicted futures improve fused-BEV tracking. Those statements are excluded from the final method claim.
+\begin{table*}[t]
+\centering
+\caption{Strict-online comparison on the V2V4Real test set. ADE and FDE are measured in meters. MOTA and coverage are reported as percentages. All learned methods use the same receiver set and are evaluated with the same target construction and endpoint rule.}
+\label{tab:main_results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccc}
+\hline
+Method & Forecast information & MOTA $\uparrow$ & Coverage $\uparrow$ & minADE$_6$@5s $\downarrow$ & minFDE$_6$@5s $\downarrow$ \\
+\hline
+Online CV & Fused query history & 65.04 & 80.49 & 3.8351 & 7.5505 \\
+Multiscale Anchors & Fused query history & 65.04 & 80.49 & 2.0384 & 3.5604 \\
+MTR \cite{shi2022mtr} & Fused query history &  &  &  &  \\
+CMP \cite{wang2025cmp} & Cooperative pipeline &  &  &  &  \\
+DualCMP (ours)$^{\dagger}$ & Fused and per-CAV BEV & 65.04 & 80.49 & 1.9350 & 3.2465 \\
+\hline
+\end{tabular}}
+\end{table*}
+
+The available seed-20 results in Table~\ref{tab:main_results} establish two comparisons that use exactly the same tracks and target masks. Multiscale motion anchors reduce minFDE by 41.71%, 51.08%, and 52.85% relative to online CV at 1, 3, and 5 s, respectively. Learned cooperative prediction further reduces minFDE by 4.51%, 7.86%, and 8.82% relative to the unlearned anchors. The dagger marks the current single-seed result; the row will be replaced by the three-seed mean and standard deviation together with the completed MTR and protocol-matched CMP baselines.
+
+### C. Ablation Studies
+
+The component study is limited to the information paths that define DualCMP. The fused-BEV baseline samples an actor-centered patch from \(\mathbf{F}_{\mathrm{fuse}}^t\) and uses the same projection and motion decoder as the full model. The next two rows retain the individual CAV maps and compare uniform aggregation with actor-query attention. Relative CAV--actor geometry is then added without changing the sampled patch or decoder. Finally, ordered history is removed while keeping the robust velocity and dispersion features. All variants use the same frozen tracker; consequently, tracking output and forecast coverage are controlled rather than treated as effects of the prediction modules. We do not include sweeps over patch size, attention heads, dropout, normalization, or removed source refiners because those experiments do not distinguish the central representation claim.
+
+\begin{table*}[t]
+\centering
+\caption{Ablation of the forecasting representation and motion context. Every row uses the same Phase-1 tracker, six motion anchors, forecast decoder, training schedule, and evaluation actor set.}
+\label{tab:component_ablation}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllcccc}
+\hline
+Forecast BEV & CAV aggregation & Geometry & Ordered history & minADE$_6$@5s $\downarrow$ & \multicolumn{3}{c}{minFDE$_6$ $\downarrow$} \\
+\cline{6-8}
+ & & & & & 1 s & 3 s & 5 s \\
+\hline
+Fused & Single actor patch & No & Yes &  &  &  &  \\
+Per-CAV & Uniform & No & Yes &  &  &  &  \\
+Per-CAV & Query attention & No & Yes &  &  &  &  \\
+Per-CAV & Query attention & Yes & No &  &  &  &  \\
+Per-CAV & Query attention & Yes & Yes & 1.9350 & 1.0310 & 2.1841 & 3.2465 \\
+\hline
+\end{tabular}}
+\end{table*}
+
+Table~\ref{tab:component_ablation} is designed as a sequence of controlled comparisons. The first three rows test whether the gain comes from retaining per-CAV features and whether actor-conditioned attention is preferable to uniform aggregation. The third and fifth rows isolate the relative-geometry encoding, and the last two rows isolate ordered temporal encoding. Only the complete seed-20 run is currently available under the final 20-epoch receiver-\(\{0,1\}\) protocol; the remaining cells are intentionally left blank rather than populated with earlier one-epoch or single-receiver diagnostics.
+
+### D. Analysis of Agent-Specific CAV Fusion
+
+The first analysis visualizes the two BEV representations at their actual consumers. We select test frames before inspecting forecast errors and require each displayed actor to have at least four valid history states. Figure~\ref{fig:attention_examples} contains a partner-only actor and a shared actor from the same frame when such a pair is available; otherwise the two examples are selected from consecutive frames of the same scene. For each actor, the figure shows the fused-BEV objectness response and persistent track, the local CAV feature magnitude within the sampled \(3\times3\) patch, the corresponding \(3\times3\) attention weights, and the six predicted trajectories. Feature magnitude is computed as the channel-wise \(\ell_2\) norm and normalized independently within each local patch. Attention weights retain their model values and are not contrast-stretched separately across CAVs.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/dualcmp_attention_examples.pdf}
+\caption{Visualization of the two DualCMP representations on V2V4Real. Each row corresponds to one tracked actor. The fused-BEV column shows the current objectness response and persistent state used by tracking. The CAV columns show the receiver-aligned actor-centered feature patches and their \(3\times3\) attention weights; the values below each patch give the attention mass summed over its nine tokens. The final column shows the six forecast means, with opacity proportional to mode probability. The visualization diagnoses how the common actor context is formed and is not interpreted as a causal or mode-specific source explanation.}
+\label{fig:attention_examples}
+\end{figure*}
+
+We next test whether the internal evidence allocation is consistent with the intended use of per-CAV features and whether it leads to a measurable forecasting difference. Receiver-only, partner-only, and shared support are defined by source-native LiDAR point support and are used only for evaluation. For each valid actor, the attention mass of CAV \(j\) is the sum of its nine patch-token weights. Figure~\ref{fig:cooperative_analysis}(a) reports the distribution of partner attention mass for the three support groups. Panel (b) bins actors by their distance to the receiver and reports the 5-s minFDE difference between the fused-BEV baseline and DualCMP. Positive values indicate an advantage for DualCMP. The predefined distance bins are \([0,20)\), \([20,40)\), \([40,60)\), \([60,80)\), and at least 80 m; bins with fewer than 100 forecast instances are omitted. Panel (c) removes partner frames at fixed rates before voxelization and compares DualCMP with the fused-BEV baseline. The same source mask is applied to tracking and forecasting, and the model is evaluated without adaptation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/dualcmp_cooperative_analysis.pdf}
+\caption{Analysis of agent-specific CAV fusion on V2V4Real. (a) Distribution of partner attention mass for receiver-only, partner-only, and shared-support actors. The box center and whiskers denote the median, interquartile range, and 1.5-IQR range. (b) Five-second minFDE improvement of DualCMP over the fused-BEV forecasting baseline as a function of receiver-to-actor distance. (c) Five-second minFDE under increasing partner-frame dropout. Curves show the mean over three seeds and shaded regions show one standard deviation. Panels (b) and (c) connect the representation choice to forecast error; panel (a) is a diagnostic of learned attention and does not establish causality.}
+\label{fig:cooperative_analysis}
+\end{figure*}
+
+The current full-model evaluation contains 15,847 receiver-only, 11,902 partner-only, and 24,848 shared 5-s forecast instances. Their minFDE values are 2.7109, 5.0998, and 2.7003 m, respectively. The higher error of partner-only actors identifies a difficult subset but does not by itself demonstrate a cooperative gain. The fused-BEV comparison in Fig.~\ref{fig:cooperative_analysis}(b) is therefore the primary evidence for the second representation, while attention mass is used only to inspect whether the learned aggregation follows the available observations.
+
+### E. Efficiency, Failure Cases, and Limitations
+
+DualCMP contains 195.68M parameters in total, of which 4.75M are trainable in Phase 2. We measure latency and peak memory on one RTX 3090 with batch size one and mixed precision. Latency is averaged over 1,000 chronological frames after 100 warm-up frames and excludes disk I/O. Communication cost is calculated from the serialized partner feature transmitted for one frame rather than from an uncompressed intermediate tensor. The final text will report the fused-BEV baseline and DualCMP measurements together so that the incremental cost of retaining and sampling per-CAV features is explicit.
+
+The qualitative results include one partner-only success case, one turning or interacting shared actor, and one short-history failure case, selected by these categories before inspecting prediction errors. Figure~\ref{fig:attention_examples} combines the success cases with the representation visualization. The failure case is reported alongside the predicted modes and track age to show the limitation caused by insufficient motion history rather than presenting only favorable examples.
+
+The current evidence is limited to V2V4Real, two synchronous CAVs, and one completed seed for the 20-epoch model. The three-seed repetitions, fused-BEV ablation, attention analysis, partner-dropout experiment, and protocol-matched learned baselines must be completed before making robustness or state-of-the-art claims. The experiments do not support conclusions about asynchronous communication, more than two CAVs, or other datasets.
 
 ## Working References
 
@@ -316,26 +386,29 @@ The completed ablations support the following statement: retaining aligned CAV f
 
 [17] X. Zhang *et al*., “Co-MTP: A Cooperative Trajectory Prediction Framework With Multi-Temporal Fusion for Autonomous Driving,” in *Proc. IEEE ICRA*, 2025.
 
+[18] S. Shi *et al*., “Motion Transformer With Global Intention Localization and Local Movement Refinement,” in *Advances in Neural Information Processing Systems*, 2022.
+
 ## Author Evidence and Citation Ledger
 
 | BibTeX key | Supported statement | Verified evidence |
 | --- | --- | --- |
 | `xu2023v2v4real` | V2V4Real supplies real multi-vehicle LiDAR viewpoints and cooperative perception sequences. | V2V4Real paper and local dataset; CVPR 2023. |
-| `wang2025cmp` | CMP uses cooperative BEV detection, AB3DMOT histories, MTR, and prediction aggregation. | `/home/qkb/Project/Reference/Paper/TXT/2025-RAL-CMP.txt`, Introduction and Sec. IV-A/B; local code audit. |
-| `zhou2025v2xpnp` | V2XPnP performs one-step spatio-temporal intermediate fusion for end-to-end cooperative perception and prediction. | `/home/qkb/Project/Reference/Paper/TXT/2025-ICCV-V2XPnP.txt`, Introduction and method overview. |
+| `wang2025cmp` | CMP uses cooperative BEV detection, AB3DMOT histories, MTR, and prediction aggregation. | `/home/qkb/Project/Reference/Thesis/Markdown/2025-RAL-Cmp.md`, Secs. IV--V; local code audit. |
+| `zhou2025v2xpnp` | V2XPnP performs one-step spatio-temporal intermediate fusion for end-to-end cooperative perception and prediction. | `/home/qkb/Project/Reference/Thesis/Markdown/2025-ICCV-V2XPnP.md`, Secs. 3 and 5. |
 | `souig2026unimm` | UniMM-V2X argues for multi-level/task-specialized cooperative representations across perception and prediction. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2026-AAAI-UniMM-V2X.md`, Introduction and multi-level fusion sections. |
 | `zhou2022hivt` | HiVT separates local context and global interaction and uses relative geometric invariance. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2022-CVPR-HiVT.md`, Secs. 1 and 3.1. |
-| `zhou2023qcnet` | QCNet uses query-centric encoding and proposal-conditioned refinement. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2023-CVPR-QCNet.md`, Secs. 1, 3.3, and 4.3. |
+| `zhou2023qcnet` | QCNet uses query-centric encoding and proposal-conditioned refinement. | `/home/qkb/Project/Reference/Thesis/Markdown/2023-CVPR-QCNet.md`, Secs. 1, 3.3, and 4.3. |
 | `pang2023pftrack` | PF-Track uses predicted future motion in persistent tracking/re-association. | CVPR 2023 paper, Secs. 3.1 and 3.3. |
 | `papais2025foresight` | ForeSight maintains multiple-hypothesis forecast memory for subsequent streaming perception/forecasting. | `/home/qkb/Project/Reference/Paper/TXT/2025-ICCV-ForeSight.txt`, Secs. 1 and 3. |
 | `wang2020v2vnet` | V2VNet uses spatially aware cross-vehicle aggregation for joint perception and motion forecasting. | `/home/qkb/Project/Reference/Paper/TXT/2020-ECCV-V2VNet.txt`, Abstract and Secs. 1 and 3. |
 | `gu2023vip3d` | ViP3D propagates 3-D agent queries through detection, tracking, and trajectory prediction. | `/home/qkb/Project/Reference/Paper/TXT/2023-CVPR-ViP3D.txt`, Abstract and Secs. 1 and 3. |
 | `zhong2025cooptrack` | CoopTrack uses persistent instance queries and learnable cross-agent association for cooperative sequential perception. | `/home/qkb/Project/Reference/Paper/TXT/2025-CoopTrack.txt`, Abstract and Secs. 1 and 3. |
-| `ruan2024v2xgraph` | V2X-Graph constructs forecasting-oriented motion and interaction representations from multi-view cooperative trajectories. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2024-NeurIPS-V2X-Graph.md`, Introduction and Secs. 4.1--4.3. |
+| `ruan2024v2xgraph` | V2X-Graph constructs forecasting-oriented motion and interaction representations from multi-view cooperative trajectories. | `/home/qkb/Project/Reference/Thesis/Markdown/2024-NeurIPS-V2X-Graph.md`, Introduction and Secs. 4.1--5.3. |
 | `you2025vitraj` | ViTraj retains vehicle-side and infrastructure-side trajectory features and performs feature-side selection and cooperative interaction. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-ACM-MM-ViTraj.md`, Introduction and Secs. 4.1--4.2. |
 | `madjid2026latefusion` | The late-fusion framework retains observer-specific forecasts and combines them after local prediction with temporal alignment and association. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2026-arxiv-Collaborative-Trajectory-Prediction.md`, Introduction and Secs. 3.1--3.2. |
 | `yu2023v2xseq` | The PP-VIC baseline fuses vehicle and infrastructure trajectories with CBMOT before TNT or HiVT forecasting. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2023-CVPR-V2X-Seq.md`, Sec. 6.2.1. |
 | `wu2025copad` | CoPAD matches multi-source trajectories with the Hungarian algorithm and fuses matched trajectories with Kalman filtering before prediction. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-IROS-CoPAD.md`, Secs. III-A--III-B. |
 | `zhang2025comtp` | Co-MTP preprocesses vehicle and infrastructure histories and performs multi-temporal trajectory fusion in a heterogeneous graph. | `/home/qkb/Project/Reference/Paper/Markdown/ALL_MARKDOWN/2025-ICRA-Co-MTP.md`, Secs. III-B--III-D. |
+| `shi2022mtr` | MTR uses intention queries and iterative local movement refinement for six-mode motion prediction. | `/home/qkb/Project/Reference/Thesis/Markdown/2022-NeurIPS-Motion-transformer-with-global-intention-localization-and-local-movement-refinem.md`, Secs. 3.2 and 4.3. |
 
 Before submission, the working references must be converted to a verified BibTeX database. The current official-test monitoring policy must be disclosed: no validation split is used, test metrics are recorded after each fixed epoch, and checkpoints are not automatically selected by test score.

@@ -1,5 +1,13 @@
 # HANDOFF
 
+## 2026-08-22 Experiments 结构与图表计划
+
+- 使用本地 PaperMeld 库 `/home/qkb/Project/Reference/Thesis/library.jsonl`（322 records）核对 CMP、V2XPnP、ObjectFusion、IS-FUSION、LoGoNet、MTR、QCNet 和 V2X-Graph 的 Experiments。共同结构为 setup、main comparison、component ablation，再按论文主张选择 robustness/efficiency/qualitative analysis；不机械复制全部实验。
+- `manuscript.md` 的 Section V 已完整改写为五节：Experimental Setup、Comparison with Existing Methods、Ablation Studies、Analysis of Agent-Specific CAV Fusion、Efficiency/Failure Cases/Limitations。主文只保留两张 LaTeX 表：strict-online 主结果与递进式组件消融；未验证结果保持空白。
+- 删除了与模型主张无直接关系的 0.1--5.0 s horizon-error 曲线。实验图只验证 DualCMP 的双表示与 agent-specific fusion：`dualcmp_attention_examples.pdf` 展示 fused-BEV current-state response、每 CAV actor patch、`[L,3,3]` attention 权重和六模态预测；`dualcmp_cooperative_analysis.pdf` 展示 support bucket 的 partner attention mass、相对 fused-BEV-only 的距离分桶 FDE 增益、partner dropout 曲线。
+- 组件消融固定为五行：fused-BEV actor patch、per-CAV uniform aggregation、per-CAV query attention、增加相对几何、增加 ordered history。motion anchors 已由主表的 Online CV→Multiscale Anchors→DualCMP 链条验证；不再做 patch size、heads、dropout、norm、source router/refiner 等非核心扫参。
+- 当前可填 seed-20 数值均来自 receiver `[0,1]`、epoch 19、online-masked 结果；MTR、严格在线 CMP、fused-BEV-only 和剩余消融为空，禁止混入旧 single-receiver/one-epoch 或 GT-filtered CMP 数字。最终计划 seeds 为 20/42/2026，曲线用均值和一倍标准差。
+
 ## 2026-08-22 删除 source refiner，收敛 DualCMP 主线
 
 - 用户明确收敛研究命题：DualCMP 只需证明双表示分工有效，不再要求表达“不同轨迹模态依赖不同 CAV”。当前主线为：`fused_bev` 负责 dense measurement 与 persistent tracking；`regrouped_source_bev` 在当前 actor 周围做一次 geometry-conditioned `3×3` CAV feature fusion；所得 cooperative context 与 ordered history、actor interaction 和 motion anchors 共同生成多模态轨迹。
