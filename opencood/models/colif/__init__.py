@@ -10,9 +10,6 @@ from opencood.models.colif.future_adapter import FutureAdapter
 from opencood.models.colif.motion_anchored_forecast import (
     MotionAnchoredForecastHead,
 )
-from opencood.models.colif.dual_source_forecast import (
-    DualSourceMotionAnchoredForecastHead,
-)
 from opencood.models.colif.persistent_query_decoder import PersistentQueryDecoder
 from opencood.models.colif.temporal_memory import TemporalQueryMemory
 from opencood.models.colif.persistent_query_mtr import PersistentQueryMTRAdapter
@@ -28,7 +25,6 @@ __all__ = [
     "ActorContextEncoder",
     "FutureAdapter",
     "MotionAnchoredForecastHead",
-    "DualSourceMotionAnchoredForecastHead",
     "PersistentQueryDecoder",
     "TemporalQueryMemory",
     "PersistentQueryMTRAdapter",

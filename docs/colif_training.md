@@ -49,7 +49,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --epochs 20 --workers 2 --eval-workers 2 --log-every 50
 ```
 
-Phase 1 使用 FP32。当前四组公平预测实验共同使用的冻结 tracker 为：
+Phase 1 使用 FP32。当前三组公平预测实验共同使用的冻结 tracker 为：
 
 ```text
 opencood/logs/colif_fused_v7_phase1_predict_correct_2epoch_20260812/checkpoint_epoch_001.pth
@@ -57,7 +57,7 @@ opencood/logs/colif_fused_v7_phase1_predict_correct_2epoch_20260812/checkpoint_e
 
 该 checkpoint 为 epoch 1 固定末轮，不是按 test 挑选。
 
-## 3. Phase 2A：默认整体最佳分支
+## 3. Phase 2：agent-specific CAV feature fusion
 
 默认配置为 geometry-conditioned actor-source fusion + ordered history + training-only cross-mode auxiliary，推理输出 proposal layer：
 
@@ -74,105 +74,28 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 
 ```
 
-已完成的严格结果/权重：
+已完成的 20 轮 receiver `[0,1]` 结果来自已移除 wrapper 中的 proposal 主干。该主干参数已逐张量原样提取到当前无 source-refiner 结构，严格加载为 0 missing / 0 unexpected：
 
 ```text
-opencood/logs/colif_fused_v19_geometry_source_seedfixed_full_1epoch_20260813/
-ADE@1/3/5s = 0.9997 / 1.8472 / 2.5870 m
-FDE@1/3/5s = 1.3708 / 2.9177 / 4.3804 m
-MOTA=0.6333, forecast coverage=0.7894
+opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth
+online-masked ADE@1/3/5s = 0.8515 / 1.4083 / 1.9350 m
+online-masked FDE@1/3/5s = 1.0310 / 2.1841 / 3.2465 m
+MOTA=0.6504, forecast coverage=0.8049
 ```
 
-## 4. Phase 2B：可选 trajectory-source 完整分支
-
-该分支保留 `K=6 × T=50` trajectory-state tokens，沿每条 proposal 在 per-source BEV 上重新采样，并部署 refined layer：
-
-```bash
-ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --forecast-refinement-type trajectory_source \
-  --forecast-inference-layer refined \
-  --init-colif-checkpoint \
-  opencood/logs/colif_fused_v7_phase1_predict_correct_2epoch_20260812/checkpoint_epoch_001.pth \
-  --output-dir opencood/logs/colif_trajectory_source_release \
-  --epochs 1 --workers 2 --eval-workers 2 --log-every 50
-```
-
-已完成的严格结果/权重：
-
-```text
-opencood/logs/colif_fused_v21_identity_trajectory_source_seedfixed_full_restart_1epoch_20260813/
-ADE@1/3/5s = 1.0728 / 1.9512 / 2.6714 m
-FDE@1/3/5s = 1.4703 / 2.9896 / 4.3836 m
-MOTA=0.6333, forecast coverage=0.7894
-```
-
-它没有超过默认分支的总体指标，但 partner-only FDE5 为 6.4371 m（默认 6.4486），age 2--3 FDE5 为 12.4346 m（默认 12.4862）。因此代码与命令保留，论文中应作为可选困难目标分支/消融，不写成总体 superiority。
-
-## 5. 公平消融命令
-
-### DualCMP v2：legacy-exact base + source corridor refiner
-
-v2 保留已验证的 geometry-conditioned actor-source proposal 作为默认公开层，并沿 detached proposal 在每张 source BEV 采样五点trajectory corridor。source final使用独立null gate和速度积分residual；训练后若refined未超过base，必须部署proposal，不能隐藏负结果。
-
-```bash
-ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --forecast-architecture dual_source_motion_anchored \
-  --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/dualcmp_v2_full_receiver01_seed20_1e_20260820 \
-  --epochs 1 --batch-size 2 --grad-accum-steps 2 \
-  --workers 2 --eval-workers 2 --log-every 50 \
-  --receiver-ids 0,1 --forecast-metric-protocol online_masked
-```
-
-五点corridor使每卡batch4在24GB RTX3090上OOM；batch2累积2保持历史协议相同的全局batch8、3420样本和428 optimizer updates。
-
-已完成checkpoint：
-
-```text
-opencood/logs/dualcmp_v2_full_receiver01_seed20_1e_20260820/checkpoint_epoch_000.pth
-```
-
-同checkpoint historical `online_masked`：
-
-```text
-proposal/base: ADE1/3/5=1.0873/1.7102/2.1969, FDE1/3/5=1.3419/2.4080/3.4186
-source refined: ADE1/3/5=1.1621/1.8936/2.4166, FDE1/3/5=1.4720/2.7359/3.6102
-```
-
-旧一轮FDE5为3.4273；v2 base为3.4186。source refined总体退化，已拒绝作为默认层。checkpoint在当前代码下默认`inference_layer=proposal`，显式诊断refined使用：
-
-```bash
---diagnostic-forecast-layer refined
-```
-
-source-disabled训练消融在同一命令增加：
-
-```bash
---disable-dual-source-refinement
-```
-
-正式比较必须从同一 Phase-1 checkpoint、相同初始化state、seed、updates、receiver协议与target population开始。不能将本节候选与下方旧消融的单次结果直接混报。
+## 4. 公平消融命令
 
 关闭 actor-source fusion：
 
 ```bash
-# 在Phase 2A命令基础上添加
+# 在 Phase 2 命令基础上添加
 --disable-actor-cooperative-fusion
 ```
 
 关闭 ordered temporal history，但保留 robust velocity/dispersion 与 actor-source fusion：
 
 ```bash
-# 在Phase 2A命令基础上添加
+# 在 Phase 2 命令基础上添加
 --disable-temporal-history
 ```
 
@@ -188,9 +111,9 @@ no ordered history:
   ADE5/FDE5=2.6535/4.3827 m
 ```
 
-训练器使用独立 `torch.Generator(seed+rank)` 和 worker seed，数据随机性不再受模型参数初始化顺序影响。四组的 MOTA、coverage、actor counts 完全相同，证明预测消融没有改变冻结 tracker。
+训练器使用独立 `torch.Generator(seed+rank)` 和 worker seed，数据随机性不再受模型参数初始化顺序影响。三组的 MOTA、coverage、actor counts 完全相同，证明预测消融没有改变冻结 tracker。
 
-## 6. 同阶段断点恢复
+## 5. 同阶段断点恢复
 
 `--resume` 仅用于同一结构、同一阶段、同一配置恢复 model/optimizer/scheduler/scaler/epoch/global step：
 
@@ -204,9 +127,9 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --epochs 2 --workers 2 --eval-workers 2
 ```
 
-不能用默认分支 checkpoint 恢复 trajectory-source 结构，反之亦然；配置 hash 不一致会拒绝 resume。跨阶段只能使用 `--init-colif-checkpoint`。
+配置 hash 不一致会拒绝 resume。跨阶段只能使用 `--init-colif-checkpoint`。由旧 wrapper 提取的 `dualcmp_core_receiver01_seed20_20e_20260821` 是仅供推理和评测的 checkpoint，不含可恢复的 optimizer/scheduler/scaler state。
 
-## 7. 双卡 smoke
+## 6. 双卡 smoke
 
 ```bash
 ulimit -n 65536
@@ -219,11 +142,11 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --epochs 1 --workers 2 --smoke-batches 5 --no-eval --log-every 1
 ```
 
-trajectory-source smoke 添加第 4 节的两个 forecast flags。只有 smoke 可用 `--smoke-force-birth`；任何 smoke/截断 test 数字都不能作为论文性能。
+只有 smoke 可用 `--smoke-force-birth`；任何 smoke/截断 test 数字都不能作为论文性能。
 
-## 8. 独立 strict-online test 与 GT-free inference
+## 7. 独立 strict-online test 与 GT-free inference
 
-评测 checkpoint（checkpoint 内配置优先，trajectory-source 无需重复 CLI override）：
+评测 checkpoint（checkpoint 内配置优先）：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \

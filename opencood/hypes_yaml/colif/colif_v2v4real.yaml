@@ -217,12 +217,9 @@ model:
       motion_anchor_scales: [0.0, 0.5, 0.75, 1.0, 1.25, 1.5]
       mode_interaction: actor_conditioned
       temporal_history: true
-      # Default: cross-mode is training-only deep supervision and proposal is
-      # served.  The optional complete branch is selected with
-      # --forecast-refinement-type trajectory_source
-      # --forecast-inference-layer refined; both configurations are retained.
+      # Cross-mode decoding is an auxiliary deep-supervision layer; the
+      # motion-anchored proposal remains the deployed prediction.
       proposal_refinement: true
-      refinement_type: cross_mode
       inference_layer: proposal
       history_encoder_layers: 2
       history_encoder_heads: 8

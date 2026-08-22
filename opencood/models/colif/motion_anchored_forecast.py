@@ -23,7 +23,6 @@ class MotionAnchoredForecastHead(nn.Module):
 
     def __init__(self, query_dim: int, args: dict):
         super().__init__()
-        self.supports_trajectory_source_context = True
         self.query_dim = int(query_dim)
         self.history_frames = int(args.get("history_frames", 11))
         self.future_frames = int(args.get("future_frames", 50))
@@ -114,15 +113,6 @@ class MotionAnchoredForecastHead(nn.Module):
         self.proposal_refinement = bool(
             args.get("proposal_refinement", True)
         )
-        self.refinement_type = str(
-            args.get("refinement_type", "cross_mode")
-        )
-        if self.refinement_type not in ("cross_mode", "trajectory_source"):
-            raise ValueError("unsupported forecast refinement_type")
-        if self.refinement_type == "trajectory_source" and not self.proposal_refinement:
-            raise ValueError(
-                "trajectory_source refinement requires proposal_refinement"
-            )
         self.inference_layer = str(
             args.get("inference_layer", "proposal")
         )
@@ -139,39 +129,6 @@ class MotionAnchoredForecastHead(nn.Module):
             batch_first=True,
             norm_first=True,
         )
-        if self.refinement_type == "trajectory_source":
-            lidar_range = args.get("lidar_range")
-            if lidar_range is None or len(lidar_range) != 6:
-                raise ValueError(
-                    "trajectory_source refinement requires lidar_range"
-                )
-            self.corridor_x_min = float(lidar_range[0])
-            self.corridor_y_min = float(lidar_range[1])
-            self.corridor_x_max = float(lidar_range[3])
-            self.corridor_y_max = float(lidar_range[4])
-            source_bev_dim = int(args.get("source_bev_dim", self.query_dim))
-            self.future_state_embedding = nn.Parameter(
-                torch.randn(self.future_frames, self.query_dim) * 0.02
-            )
-            self.trajectory_source_projection = nn.Linear(
-                source_bev_dim, self.query_dim
-            )
-            self.trajectory_source_score = nn.Linear(self.query_dim, 1)
-            self.trajectory_state_norm = nn.LayerNorm(self.query_dim)
-            self.trajectory_state_encoder = nn.TransformerEncoderLayer(
-                d_model=self.query_dim,
-                nhead=int(args.get("state_encoder_heads", 8)),
-                dim_feedforward=int(
-                    args.get("state_encoder_ffn", self.query_dim * 2)
-                ),
-                dropout=float(args.get("dropout", 0.1)),
-                batch_first=True,
-                norm_first=True,
-            )
-            self.trajectory_residual_head = nn.Linear(self.query_dim, 2)
-            self.trajectory_log_std_head = nn.Linear(self.query_dim, 2)
-            self.trajectory_rho_head = nn.Linear(self.query_dim, 1)
-            self.trajectory_mode_score = nn.Linear(self.query_dim, 1)
         self.proposal_mode_score = nn.Linear(self.query_dim, 1)
         self.proposal_residual_head = nn.Linear(
             self.query_dim, self.future_frames * 2
@@ -218,15 +175,6 @@ class MotionAnchoredForecastHead(nn.Module):
         for rho_head in (self.proposal_rho_head, self.rho_head):
             nn.init.zeros_(rho_head.weight)
             nn.init.zeros_(rho_head.bias)
-        if self.refinement_type == "trajectory_source":
-            nn.init.zeros_(self.trajectory_residual_head.weight)
-            nn.init.zeros_(self.trajectory_residual_head.bias)
-            nn.init.zeros_(self.trajectory_log_std_head.weight)
-            nn.init.zeros_(self.trajectory_log_std_head.bias)
-            nn.init.zeros_(self.trajectory_rho_head.weight)
-            nn.init.zeros_(self.trajectory_rho_head.bias)
-            nn.init.zeros_(self.trajectory_mode_score.weight)
-            nn.init.zeros_(self.trajectory_mode_score.bias)
         self.enabled = bool(args.get("enabled", True))
 
         pair_i, pair_j = torch.triu_indices(
@@ -260,18 +208,6 @@ class MotionAnchoredForecastHead(nn.Module):
                 self.proposal_residual_head,
                 self.proposal_log_std_head,
                 self.proposal_rho_head,
-            ):
-                for parameter in module.parameters():
-                    parameter.requires_grad = False
-        elif self.refinement_type == "trajectory_source":
-            # The anchor-unaware cross-mode branch is replaced by explicit
-            # source sampling along every proposal state.
-            for module in (
-                self.mode_refiner,
-                self.mode_score,
-                self.residual_head,
-                self.log_std_head,
-                self.rho_head,
             ):
                 for parameter in module.parameters():
                     parameter.requires_grad = False
@@ -486,121 +422,6 @@ class MotionAnchoredForecastHead(nn.Module):
         # allowing each actor feature to affect modes differently.
         return actor * (1.0 + torch.tanh(mode)) + mode
 
-    def _trajectory_source_refinement(
-        self,
-        source_bev,
-        cav_mask,
-        boxes,
-        proposal_mean,
-        proposal_log_std,
-        proposal_rho,
-        proposal_logits,
-        mode_feature,
-    ):
-        """Refine each mode/time state using evidence along its BEV corridor."""
-
-        if source_bev is None or cav_mask is None:
-            raise ValueError(
-                "trajectory_source refinement requires source_bev and cav_mask"
-            )
-        if source_bev.ndim != 5:
-            raise ValueError("source_bev must have shape [B,L,C,H,W]")
-        batch, agents, channels, height, width = source_bev.shape
-        queries = boxes.shape[1]
-        if cav_mask.shape != (batch, agents):
-            raise ValueError("cav_mask must have shape [B,L]")
-        absolute_xy = boxes[..., None, None, :2] + proposal_mean
-        grid_x = 2.0 * (
-            (absolute_xy[..., 0] - self.corridor_x_min)
-            / (self.corridor_x_max - self.corridor_x_min)
-        ) - 1.0
-        grid_y = 2.0 * (
-            (absolute_xy[..., 1] - self.corridor_y_min)
-            / (self.corridor_y_max - self.corridor_y_min)
-        ) - 1.0
-        grid = torch.stack((grid_x, grid_y), dim=-1)
-        source_grid = grid[:, None].expand(
-            batch,
-            agents,
-            queries,
-            self.modes,
-            self.future_frames,
-            2,
-        )
-        sampled = F.grid_sample(
-            source_bev.reshape(batch * agents, channels, height, width),
-            source_grid.reshape(
-                batch * agents,
-                queries * self.modes,
-                self.future_frames,
-                2,
-            ),
-            mode="bilinear",
-            padding_mode="zeros",
-            align_corners=False,
-        )
-        sampled = sampled.view(
-            batch,
-            agents,
-            channels,
-            queries,
-            self.modes,
-            self.future_frames,
-        ).permute(0, 3, 4, 5, 1, 2)
-        source_tokens = self.trajectory_source_projection(sampled)
-        state_query = (
-            mode_feature[..., None, :]
-            + self.future_state_embedding.view(
-                1, 1, 1, self.future_frames, self.query_dim
-            )
-        )
-        compatibility = self.trajectory_source_score(
-            torch.tanh(source_tokens + state_query[..., None, :])
-        ).squeeze(-1)
-        source_valid = cav_mask[:, None, None, None, :].bool()
-        compatibility = compatibility.masked_fill(~source_valid, -1e4)
-        source_weights = torch.softmax(compatibility, dim=-1)
-        source_context = (
-            source_weights[..., None] * source_tokens
-        ).sum(dim=-2)
-        state_tokens = self.trajectory_state_norm(
-            state_query + source_context
-        )
-        encoded_state = self.trajectory_state_encoder(
-            state_tokens.reshape(
-                batch * queries * self.modes,
-                self.future_frames,
-                self.query_dim,
-            )
-        ).view(
-            batch,
-            queries,
-            self.modes,
-            self.future_frames,
-            self.query_dim,
-        )
-        residual_limit = 0.5 * self.residual_limit_m
-        correction = residual_limit * torch.tanh(
-            self.trajectory_residual_head(encoded_state) / residual_limit
-        )
-        mean = proposal_mean + correction
-        log_std = (
-            proposal_log_std
-            + 0.5 * torch.tanh(self.trajectory_log_std_head(encoded_state))
-        ).clamp(
-            -1.609, 5.0,
-        )
-        rho = (
-            proposal_rho
-            + 0.25 * torch.tanh(self.trajectory_rho_head(encoded_state))
-        ).clamp(-0.5, 0.5)
-        pooled_mode = encoded_state.mean(dim=-2)
-        logits = (
-            proposal_logits
-            + self.trajectory_mode_score(pooled_mode).squeeze(-1)
-        )
-        return logits, mean, log_std, rho, pooled_mode, source_weights
-
     def empty_outputs(self, query_feat, valid_mask):
         batch, queries, _ = query_feat.shape
         trajectories = query_feat.new_zeros(
@@ -655,8 +476,6 @@ class MotionAnchoredForecastHead(nn.Module):
         history_mask,
         receiver_time_s,
         cooperative_context=None,
-        source_bev=None,
-        cav_mask=None,
     ):
         del receiver_time_s
         output = self.empty_outputs(query_feat, valid_mask)
@@ -712,53 +531,30 @@ class MotionAnchoredForecastHead(nn.Module):
             proposal_trajectories = torch.cat(
                 (proposal_mean, proposal_log_std, proposal_rho), dim=-1
             )
-            if self.refinement_type == "cross_mode":
-                refined_feature = self.mode_refiner(
-                    mode_feature.reshape(-1, self.modes, self.query_dim)
-                ).view_as(mode_feature)
-                residual_limit = 0.5 * self.residual_limit_m
-                base_mean = proposal_mean
-            else:
-                (
-                    logits,
-                    mean,
-                    log_std,
-                    rho,
-                    refined_feature,
-                    _,
-                ) = self._trajectory_source_refinement(
-                    source_bev,
-                    cav_mask,
-                    boxes,
-                    proposal_mean,
-                    proposal_log_std,
-                    proposal_rho,
-                    proposal_logits,
-                    mode_feature,
-                )
+            refined_feature = self.mode_refiner(
+                mode_feature.reshape(-1, self.modes, self.query_dim)
+            ).view_as(mode_feature)
+            residual_limit = 0.5 * self.residual_limit_m
+            base_mean = proposal_mean
         else:
             refined_feature = mode_feature
             residual_limit = self.residual_limit_m
             base_mean = anchors
-        if not (
-            self.proposal_refinement
-            and self.refinement_type == "trajectory_source"
-        ):
-            logits = self.mode_score(refined_feature).squeeze(-1)
-            refinement = residual_limit * torch.tanh(
-                self.residual_head(refined_feature).view(
-                    *refined_feature.shape[:-1], self.future_frames, 2
-                ) / self.residual_limit_m
-            )
-            mean = base_mean + refinement
-            log_std = self.log_std_head(refined_feature).view(
+        logits = self.mode_score(refined_feature).squeeze(-1)
+        refinement = residual_limit * torch.tanh(
+            self.residual_head(refined_feature).view(
                 *refined_feature.shape[:-1], self.future_frames, 2
-            ).clamp(-1.609, 5.0)
-            rho = 0.5 * torch.tanh(
-                self.rho_head(refined_feature).view(
-                    *refined_feature.shape[:-1], self.future_frames, 1
-                )
+            ) / self.residual_limit_m
+        )
+        mean = base_mean + refinement
+        log_std = self.log_std_head(refined_feature).view(
+            *refined_feature.shape[:-1], self.future_frames, 2
+        ).clamp(-1.609, 5.0)
+        rho = 0.5 * torch.tanh(
+            self.rho_head(refined_feature).view(
+                *refined_feature.shape[:-1], self.future_frames, 1
             )
+        )
         trajectories = torch.cat((mean, log_std, rho), dim=-1)
         use_proposal = (
             self.proposal_refinement and self.inference_layer == "proposal"

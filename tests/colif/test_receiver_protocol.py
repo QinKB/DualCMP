@@ -1,14 +1,10 @@
-from types import SimpleNamespace
-
 import pytest
-import torch
 
 from opencood.tools import eval_colif_v2v4real, inference_colif_v2v4real, train_colif
 from opencood.tools.colif.receiver_protocol import (
     apply_receiver_override,
     parse_receiver_ids,
 )
-from opencood.tools.colif_train_utils import clip_forecast_gradient_groups
 
 
 def test_receiver_override_retains_cmp_requested_ego_order() -> None:
@@ -36,33 +32,6 @@ def test_checkpoint_hypes_can_be_explicitly_evaluated_for_both_receivers() -> No
 
     assert apply_receiver_override(hypes, "0,1") == (0, 1)
     assert hypes["fusion"]["args"]["receiver_ids"] == [0, 1]
-
-
-def test_source_gradient_clipping_cannot_scale_base_gradient() -> None:
-    base = torch.nn.Parameter(torch.ones(1))
-    source = torch.nn.Parameter(torch.ones(1))
-    actor = torch.nn.Parameter(torch.ones(1))
-    base.grad = torch.tensor([2.0])
-    source.grad = torch.tensor([2000.0])
-    actor.grad = torch.tensor([3.0])
-
-    class Head(torch.nn.Module):
-        def gradient_parameter_groups(self):
-            return {"base": [base], "source": [source]}
-
-    actor_module = torch.nn.Module()
-    actor_module.register_parameter("weight", actor)
-    model = SimpleNamespace(
-        forecast_head=Head(),
-        actor_cooperative_fusion=actor_module,
-    )
-    norms = clip_forecast_gradient_groups(model, 1000.0)
-
-    torch.testing.assert_close(base.grad, torch.tensor([2.0]))
-    torch.testing.assert_close(actor.grad, torch.tensor([3.0]))
-    torch.testing.assert_close(source.grad.abs(), torch.tensor([1000.0]), atol=1e-3, rtol=1e-5)
-    assert norms["base"] < 1000.0
-    assert norms["source"] >= 2000.0
 
 
 @pytest.mark.parametrize(
@@ -151,49 +120,3 @@ def test_evaluator_only_overrides_forecast_layer_when_explicit() -> None:
     assert report["checkpoint_inference_layer"] == "proposal"
     assert report["effective_inference_layer"] == "refined"
     assert report["diagnostic_forecast_layer_override"] is True
-
-
-def test_trainer_accepts_opt_in_dual_source_forecast_head(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "train_colif",
-            "--hypes_yaml",
-            "colif.yaml",
-            "--forecast-architecture",
-            "dual_source_motion_anchored",
-        ],
-    )
-
-    assert (
-        train_colif._arguments().forecast_architecture
-        == "dual_source_motion_anchored"
-    )
-
-
-def test_trainer_accepts_fused_base_ablation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "train_colif",
-            "--hypes_yaml",
-            "colif.yaml",
-            "--disable-dual-source-refinement",
-        ],
-    )
-
-    assert train_colif._arguments().disable_dual_source_refinement is True
-
-
-def test_trainer_accepts_availability_bias_ablation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "train_colif",
-            "--hypes_yaml",
-            "colif.yaml",
-            "--disable-source-availability-bias",
-        ],
-    )
-
-    assert train_colif._arguments().disable_source_availability_bias is True

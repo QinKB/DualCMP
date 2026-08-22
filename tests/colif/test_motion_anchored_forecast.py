@@ -9,7 +9,6 @@ def _head(
     mode_interaction="actor_conditioned",
     temporal_history=True,
     proposal_refinement=True,
-    refinement_type="cross_mode",
 ):
     return MotionAnchoredForecastHead(
         16,
@@ -27,9 +26,6 @@ def _head(
             "history_encoder_layers": 1,
             "history_encoder_heads": 4,
             "proposal_refinement": proposal_refinement,
-            "refinement_type": refinement_type,
-            "lidar_range": [-8.0, -8.0, -3.0, 8.0, 8.0, 3.0],
-            "source_bev_dim": 16,
         },
     )
 
@@ -346,118 +342,3 @@ def test_proposal_inference_ablation_returns_supervised_proposal_layer() -> None
         output["pred_scores"],
         torch.softmax(output["loss_pred_scores_layers"][:, :, 0], dim=-1),
     )
-
-
-def test_trajectory_source_refinement_starts_as_identity_update() -> None:
-    """A new refiner must not destroy an already usable proposal layer."""
-
-    torch.manual_seed(17)
-    head = _head(refinement_type="trajectory_source").eval()
-    query = torch.randn(1, 1, 16)
-    boxes = torch.zeros(1, 1, 7)
-    history = torch.zeros(1, 1, 11, 7)
-    history[..., -3:, 0] = torch.tensor([0.0, 0.1, 0.2])
-    history_mask = torch.zeros(1, 1, 11, dtype=torch.bool)
-    history_mask[..., -3:] = True
-    output = head(
-        query,
-        boxes,
-        torch.ones(1, 1, dtype=torch.bool),
-        history,
-        history_mask,
-        torch.zeros(1),
-        source_bev=torch.randn(1, 2, 16, 8, 8),
-        cav_mask=torch.tensor([[True, True]]),
-    )
-
-    torch.testing.assert_close(
-        output["loss_pred_trajs_local_layers"][:, :, 1],
-        output["loss_pred_trajs_local_layers"][:, :, 0],
-    )
-    torch.testing.assert_close(
-        output["loss_pred_scores_layers"][:, :, 1],
-        output["loss_pred_scores_layers"][:, :, 0],
-    )
-
-
-def test_trajectory_source_refinement_uses_valid_partner_along_proposals() -> None:
-    torch.manual_seed(19)
-    head = _head(refinement_type="trajectory_source").train()
-    with torch.no_grad():
-        head.trajectory_residual_head.weight.normal_(0.0, 0.1)
-    query = torch.randn(1, 1, 16)
-    boxes = torch.zeros(1, 1, 7)
-    history = torch.zeros(1, 1, 11, 7)
-    history[..., -3:, 0] = torch.tensor([0.0, 0.1, 0.2])
-    mask = torch.zeros(1, 1, 11, dtype=torch.bool)
-    mask[..., -3:] = True
-    source = torch.randn(1, 2, 16, 8, 8, requires_grad=True)
-    valid = torch.ones(1, 1, dtype=torch.bool)
-    both = torch.tensor([[True, True]])
-
-    output = head(
-        query,
-        boxes,
-        valid,
-        history,
-        mask,
-        torch.zeros(1),
-        source_bev=source,
-        cav_mask=both,
-    )
-    changed_source = source.detach().clone()
-    changed_source[:, 1] += 20.0
-    changed = head(
-        query,
-        boxes,
-        valid,
-        history,
-        mask,
-        torch.zeros(1),
-        source_bev=changed_source,
-        cav_mask=both,
-    )
-
-    torch.testing.assert_close(
-        output["loss_pred_trajs_local_layers"][:, :, 0],
-        changed["loss_pred_trajs_local_layers"][:, :, 0],
-    )
-    assert not torch.allclose(
-        output["loss_pred_trajs_local_layers"][:, :, 1],
-        changed["loss_pred_trajs_local_layers"][:, :, 1],
-    )
-    output["loss_pred_trajs_local_layers"][:, :, 1].square().mean().backward()
-    assert source.grad is not None
-    assert torch.count_nonzero(source.grad[:, 1]) > 0
-
-
-def test_trajectory_source_refinement_hard_masks_invalid_partner() -> None:
-    torch.manual_seed(23)
-    head = _head(refinement_type="trajectory_source").eval()
-    with torch.no_grad():
-        head.trajectory_residual_head.weight.normal_(0.0, 0.1)
-    query = torch.randn(1, 1, 16)
-    boxes = torch.zeros(1, 1, 7)
-    history = torch.zeros(1, 1, 11, 7)
-    history[..., -3:, 0] = torch.tensor([0.0, 0.1, 0.2])
-    history_mask = torch.zeros(1, 1, 11, dtype=torch.bool)
-    history_mask[..., -3:] = True
-    source = torch.randn(1, 2, 16, 8, 8)
-    receiver_only = torch.tensor([[True, False]])
-    args = (
-        query,
-        boxes,
-        torch.ones(1, 1, dtype=torch.bool),
-        history,
-        history_mask,
-        torch.zeros(1),
-    )
-    original = head(
-        *args, source_bev=source, cav_mask=receiver_only
-    )["loss_pred_trajs_local_layers"][:, :, 1]
-    source[:, 1] = 10_000.0
-    changed = head(
-        *args, source_bev=source, cav_mask=receiver_only
-    )["loss_pred_trajs_local_layers"][:, :, 1]
-
-    torch.testing.assert_close(original, changed)

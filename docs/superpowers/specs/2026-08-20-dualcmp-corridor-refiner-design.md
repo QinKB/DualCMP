@@ -1,5 +1,7 @@
 # DualCMP Corridor Refiner v2 Design
 
+> **Retired 2026-08-22.** The source-refined output underperformed the proposal and this architecture has been removed from the active model. This file is retained only as historical failure evidence; see `model_design.md` for the current design.
+
 ## 1. 目标
 
 重建 `dual_source_motion_anchored`，使模型满足以下不可妥协的合同：

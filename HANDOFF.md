@@ -1,5 +1,14 @@
 # HANDOFF
 
+## 2026-08-22 删除 source refiner，收敛 DualCMP 主线
+
+- 用户明确收敛研究命题：DualCMP 只需证明双表示分工有效，不再要求表达“不同轨迹模态依赖不同 CAV”。当前主线为：`fused_bev` 负责 dense measurement 与 persistent tracking；`regrouped_source_bev` 在当前 actor 周围做一次 geometry-conditioned `3×3` CAV feature fusion；所得 cooperative context 与 ordered history、actor interaction 和 motion anchors 共同生成多模态轨迹。
+- 已从 active code 删除 `dual_source_forecast.py`、`trajectory_corridor.py`、legacy `trajectory_source` 分支、source availability/gate/smoothness/residual losses、专用 gradient clipping、CLI flags、health logging及对应测试。`forecast.architecture` 只保留 `cmp_mtr` 与 `motion_anchored`；YAML 不再包含 `refinement_type`。
+- source refiner 的失败证据仍保留在本文件下方和 Git 历史：receiver `[0,1]` 一轮 proposal FDE5=`3.4186`，source-refined FDE5=`3.6102`。该负结果不再进入 active Method 或部署结构。
+- receiver `[0,1]` 的 20 轮训练已完成。epoch 19 proposal 在 `online_masked` 协议下 ADE1/3/5=`0.851468/1.408316/1.935000`，FDE1/3/5=`1.030991/2.184138/3.246500`，MOTA=`0.650443`，coverage=`0.804925`；FDE5 优于修改前的 `3.427314`。
+- 为避免删除 wrapper 后丢失已训练结果，已将 epoch 19 的 `forecast_head.motion_base.*` 逐张量重命名为当前 `forecast_head.*`，删除 45 个 refiner tensors，并生成推理/评测 checkpoint：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`。当前模型严格加载为 0 missing / 0 unexpected；该 checkpoint 不含可恢复 optimizer/scheduler/scaler state。
+- `manuscript.md` 的 Method 已改为六节：Framework Overview、Cooperative BEV Feature Encoding、Persistent Query Tracking、Agent-Specific CAV Feature Fusion、Multimodal Motion Prediction、Training Losses。方法公式与当前代码一致，不再包含 mode-specific source routing、availability loss 或 trajectory refinement。
+
 ## 2026-08-21 DualCMP v2完整修复、receiver0/1一轮训练与验收
 
 - 已确认`--receiver-ids 0,1`不是日志装饰：入口写入`fusion.args.receiver_ids`，`ColifSequenceDataset`据此为每个`(scene,receiver)`构造独立clip。旧release为3420 train records/3986 test frames；A0--A3此前只用`[0]`，为1710/1993。本轮v2恢复`[0,1]`。

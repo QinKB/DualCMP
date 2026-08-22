@@ -1,5 +1,7 @@
 # DualCMP Corridor Refiner v2 Implementation Plan
 
+> **Retired 2026-08-22.** This plan was executed and rejected after the source-refined output underperformed the proposal. The implementation has been removed; this file is historical evidence only.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the failed v1 dual-source head with a legacy-exact actor-source motion base plus a conservative mode/time/source trajectory-corridor refiner, then train and evaluate it under the historical two-receiver one-epoch protocol.
