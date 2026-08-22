@@ -1,10 +1,19 @@
 # HANDOFF
 
+## 2026-08-22 基于 epoch-19 权重生成 DualCMP 注意力图
+
+- 新增 `opencood/tools/plot_dualcmp_attention.py`，严格加载 `opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`，按时间顺序执行 online inference；GT 只在 forward 完成后用于匹配、support 分组、误差计算和轨迹叠加，不进入模型输入。脚本支持 `torchrun` 分片、稳定样例选择、scene-receiver 聚类 bootstrap，并输出 PDF、PNG、压缩逐目标记录和 JSON 复现摘要。
+- 两卡完整运行覆盖 3,986 个 receiver-centric test frames，得到 52,597 个有效 5-s forecast records：receiver-only 15,847、partner-only 11,902、shared 24,848，与正式评测的 support counts 一致。临时 rank 分片已自动删除。
+- `figures/dualcmp_attention_examples.pdf/png` 展示当前权重的 fused-BEV objectness/track、receiver/partner 局部 CAV 特征、原始 9-token 注意力权重与 CAV mass、六模态预测和 GT。候选必须满足 age≥4、完整 5-s future、未来位移≥5 m；每个 support 类别从稳定 hash reservoir 中选择 minFDE 最接近类别中位数的样例，避免只展示最低误差个例。
+- `figures/dualcmp_attention_analysis.pdf/png` 展示 partner attention mass 的 support 分组分布，以及 partner mass 随 `receiver distance - partner distance` 的五分位变化。receiver-only、partner-only、shared 的 partner-mass 中位数分别为 0.3706、0.5988、0.4839；相对距离五组的均值从 0.3600 单调增至 0.5642。95% CI 由 1,000 次 scene-receiver cluster bootstrap 得到。它只能支持“注意力随证据来源与相对几何变化”的内部行为诊断，不能替代 fused-only 因果消融。
+- 完整记录与复现元数据保存在 `figures/dualcmp_attention_records.npz`（1.5 MB）和 `figures/dualcmp_attention_summary.json`。`manuscript.md` 的实验分析及图注已改为与这两张真实图一致，删除了尚未执行的 fused-only distance improvement 和 partner dropout 面板。
+- 验证：绘图专项测试 8 passed；完整 `tests/colif` 131 passed（16 个既有 warning）；`py_compile`、`git diff --check`、PDF 单页结构和图片视觉检查均通过。
+
 ## 2026-08-22 Experiments 结构与图表计划
 
 - 使用本地 PaperMeld 库 `/home/qkb/Project/Reference/Thesis/library.jsonl`（322 records）核对 CMP、V2XPnP、ObjectFusion、IS-FUSION、LoGoNet、MTR、QCNet 和 V2X-Graph 的 Experiments。共同结构为 setup、main comparison、component ablation，再按论文主张选择 robustness/efficiency/qualitative analysis；不机械复制全部实验。
 - `manuscript.md` 的 Section V 已完整改写为五节：Experimental Setup、Comparison with Existing Methods、Ablation Studies、Analysis of Agent-Specific CAV Fusion、Efficiency/Failure Cases/Limitations。主文只保留两张 LaTeX 表：strict-online 主结果与递进式组件消融；未验证结果保持空白。
-- 删除了与模型主张无直接关系的 0.1--5.0 s horizon-error 曲线。实验图只验证 DualCMP 的双表示与 agent-specific fusion：`dualcmp_attention_examples.pdf` 展示 fused-BEV current-state response、每 CAV actor patch、`[L,3,3]` attention 权重和六模态预测；`dualcmp_cooperative_analysis.pdf` 展示 support bucket 的 partner attention mass、相对 fused-BEV-only 的距离分桶 FDE 增益、partner dropout 曲线。
+- 删除了与模型主张无直接关系的 0.1--5.0 s horizon-error 曲线。已完成的实验图只诊断 DualCMP 的双表示与 agent-specific fusion：`dualcmp_attention_examples.pdf` 展示 fused-BEV current-state response、每 CAV actor patch、`[L,3,3]` attention 权重和六模态预测；`dualcmp_attention_analysis.pdf` 展示 support bucket 的 partner attention mass 及其与 actor--CAV 相对距离的关系。fused-BEV-only 因果对照和 partner dropout 尚未执行，不进入当前图。
 - 组件消融固定为五行：fused-BEV actor patch、per-CAV uniform aggregation、per-CAV query attention、增加相对几何、增加 ordered history。motion anchors 已由主表的 Online CV→Multiscale Anchors→DualCMP 链条验证；不再做 patch size、heads、dropout、norm、source router/refiner 等非核心扫参。
 - 当前可填 seed-20 数值均来自 receiver `[0,1]`、epoch 19、online-masked 结果；MTR、严格在线 CMP、fused-BEV-only 和剩余消融为空，禁止混入旧 single-receiver/one-epoch 或 GT-filtered CMP 数字。最终计划 seeds 为 20/42/2026，曲线用均值和一倍标准差。
 

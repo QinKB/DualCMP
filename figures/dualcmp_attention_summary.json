@@ -1,0 +1,109 @@
+{
+  "bootstrap": {
+    "cluster": "scene_receiver",
+    "repeats": 1000,
+    "seed": 20
+  },
+  "checkpoint": "/home/qkb/Project/CoLIF/opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth",
+  "checkpoint_config_hash": "36021537183a2adc4d2221a07b106af83f25354b1aaef0057c9d8df7f43052d3",
+  "checkpoint_epoch": 19,
+  "checkpoint_global_step": 8560,
+  "curves": {
+    "attention_mass_by_relative_distance": {
+      "centers": [
+        -38.22177041079849,
+        -8.578282552538505,
+        -1.316133987925623,
+        7.021137680344238,
+        30.13640420214944
+      ],
+      "count": [
+        10520,
+        10519,
+        10519,
+        10519,
+        10520
+      ],
+      "edges": [
+        -70.30799202783203,
+        -14.384545135498046,
+        -6.087736511230468,
+        4.916436004638673,
+        8.883807384967808,
+        70.44402413232422
+      ],
+      "lower": [
+        0.31832374606981784,
+        0.42137703723504466,
+        0.4491667119231078,
+        0.5188359741274672,
+        0.520499599070263
+      ],
+      "mean": [
+        0.36002838722724084,
+        0.44270628479221996,
+        0.4758626471484939,
+        0.5268351404432483,
+        0.5641540157973426
+      ],
+      "upper": [
+        0.4156333161388169,
+        0.46622182097763937,
+        0.5033006087505439,
+        0.5353592173593282,
+        0.5868902665318446
+      ]
+    }
+  },
+  "example_selection": {
+    "candidate_reservoir_size_per_rank": 64,
+    "minimum_age": 4,
+    "minimum_future_displacement_m": 5.0,
+    "requires_complete_5s_future": true,
+    "rule": "closest to support-category median minFDE within a stable hash reservoir"
+  },
+  "git_commit": "36b608a610208c1709c168ea7b3cf4a7452d663f",
+  "matched_forecast_records": 52597,
+  "processed_frames": 3986,
+  "receiver_ids": [
+    0,
+    1
+  ],
+  "selected_examples": [
+    {
+      "actor": 1000000001,
+      "age": 18,
+      "attention_mass": [
+        0.45382994413375854,
+        0.5461699962615967
+      ],
+      "candidate_priority": 435066443736424131,
+      "frame": 49,
+      "minfde_5s_m": 1.218393087387085,
+      "receiver": 0,
+      "scene": "testoutput_CAV_data_2022-03-15-09-54-40_0",
+      "support": "partner_only"
+    },
+    {
+      "actor": 6,
+      "age": 108,
+      "attention_mass": [
+        0.4282767176628113,
+        0.5717232823371887
+      ],
+      "candidate_priority": 293833147856293547,
+      "frame": 171,
+      "minfde_5s_m": 0.7755339741706848,
+      "receiver": 1,
+      "scene": "testoutput_CAV_data_2022-03-17-11-02-23_1",
+      "support": "shared"
+    }
+  ],
+  "support_counts": {
+    "partner_only": 11902,
+    "receiver_only": 15847,
+    "shared": 24848
+  },
+  "test_frames": 3986,
+  "world_size": 2
+}
