@@ -4,10 +4,10 @@ The script performs strict-online inference on complete V2V4Real
 scene--receiver timelines.  It produces two figures without using model
 targets during forward:
 
-1. fused-BEV tracking evidence, per-CAV actor patches, attention weights, and
-   multimodal trajectories for deterministically selected actors;
+1. fused-BEV tracking evidence, per-CAV agent patches, attention weights, and
+   multimodal trajectories for deterministically selected agents;
 2. partner-attention statistics stratified by source support and relative
-   actor--CAV geometry.
+   agent--CAV geometry.
 """
 
 from __future__ import annotations
@@ -465,7 +465,7 @@ def plot_attention_examples(examples: list[dict], output_stem: Path) -> None:
         forecast_axis.set_ylim(-radius, radius)
         scene, receiver, frame, actor = example["key"]
         axes[row, 0].set_ylabel(
-            "%s\nreceiver=%d, frame=%d\nactor=%d, age=%d"
+            "%s\nreceiver=%d, frame=%d\nagent=%d, age=%d"
             % (SUPPORT_NAMES[example["support"]], receiver, frame, actor, example["age"])
         )
         for axis in axes[row]:
@@ -533,7 +533,7 @@ def plot_attention_analysis(
         median.set_linewidth(1.2)
     axes[0].set_ylabel("Partner attention mass")
     axes[0].set_ylim(0.0, 1.0)
-    axes[0].set_title("(a) Evidence support")
+    axes[0].set_title("(a) Observation support")
 
     axis = axes[1]
     valid = np.isfinite(mass_curve["mean"]) & (mass_curve["count"] >= 100)
@@ -555,7 +555,7 @@ def plot_attention_analysis(
     axis.axvline(0.0, color="#777777", linestyle="--", linewidth=0.8)
     axis.set_xlabel("Receiver distance $-$ partner distance (m)")
     axis.set_ylabel("Partner attention mass")
-    axis.set_title("(b) Actor--CAV geometry")
+    axis.set_title("(b) Agent--CAV geometry")
     axis.grid(axis="y", color="#DDDDDD", linewidth=0.6)
     axes[1].set_ylim(0.0, 1.0)
     output_stem.parent.mkdir(parents=True, exist_ok=True)
