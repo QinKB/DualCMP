@@ -2,6 +2,15 @@
 
 本文件保存重要里程碑与证据索引；当前继续执行点只见 `HANDOFF.md`。
 
+## 2026-08-24 — 全稿证据审计与 Experiments/Conclusion 收敛
+
+- 以本地 CMP、V2XPnP、ObjectFusion、IS-FUSION、LoGoNet、MTR 为写作语料，`manuscript.md` 的实验结构收敛为 setup、overall performance、source-specific representation、source-aware analysis、efficiency/limitations；主文只保留 2 张表和 2 幅与核心表示主张直接相关的结果图。Conclusion 为 168 个近似 prose words，落在所查相关论文的常见长度内。
+- 标题去掉实现不支持的 `Task-Adaptive`，Method 补齐 source attention 的 output LayerNorm，并将两次 active state entries 与真实 history mask 合同对齐。摘要、引言、实验和结论均把 fused/per-CAV 精度差异明确保留为待验证主张。
+- epoch-19 指标逐项对回 `dualcmp_v2_full_receiver01_seed20_20e_20260821/metrics_test.jsonl`；attention 数量、中位数与距离分组逐项对回 NPZ/JSON。审计覆盖 3,986 frames、52,597 matched forecasts；17 个引用键与 ledger 一致，公式 1--12 连续，4 个图表标签闭合。
+- 历史代码复核确认已删除 source refiner 不会向 core proposal/cross-mode 反传：base trajectory/logit 显式 detach，source RNG 隔离，core loss 权重与现行代码相同。迁移 checkpoint 可恢复当前推理权重，但不能恢复优化器；新增 seeds 必须直接用现行 core 配方。
+- 验证：`tests/colif/test_dualcmp_attention_plot.py` 8 passed；绘图脚本 compileall、metric/claim assertions、section/citation/equation/label audit 与 `git diff --check` 通过。checkpoint `CP-20260824-02` / `afa5364`。
+- 剩余因果缺口：seed-20 fused run 尚在执行；uniform mean、协议匹配 MTR/CMP、额外 seeds、latency/peak memory 与正式 BibTeX 未完成，当前注意力图不能替代 fused-vs-per-CAV 消融。
+
 ## 2026-08-23 — 项目状态分层与当前训练入口
 
 - 将即时恢复状态收敛为短 `HANDOFF.md`，历史证据迁入本文件；`MEMORY.md` 只保留稳定知识，`model_design.md` 只保留当前模型合同。
