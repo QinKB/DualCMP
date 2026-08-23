@@ -1,10 +1,6 @@
 # CoLIF 最终模型设计与实现合同
 
-> **2026-08-22 更新：** source/trajectory refiner 已从模型、损失、训练入口和测试中删除。当前模型只有一条预测主线：fused BEV 用于检测与 persistent tracking，receiver-aligned per-CAV BEV 用于 agent-specific feature fusion，随后直接进入 motion-anchored multimodal decoder。旧 wrapper 中的 20 轮 proposal 权重已无损提取到当前结构，online-masked FDE5=`3.2465`。
-
-> **2026-08-23 消融合同：** 主模型默认 `actor_cooperative_fusion.representation=per_cav`。`fused` 模式只把预测 reader 的输入替换为 `fused_bev.unsqueeze(1)` 与 receiver-frame identity transform；检测、tracking、query、history、forecast head、loss 和参数量不变。`--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线。
-
-> 本文件只描述当前可运行模型；已放弃的 source refiner、future feedback 和旧三阶段方案仅保留在 Git 历史与 `HANDOFF.md` 中。
+> **表示消融合同：** 主模型默认 `actor_cooperative_fusion.representation=per_cav`。`fused` 模式只把预测 reader 的输入替换为 `fused_bev.unsqueeze(1)` 与 receiver-frame identity transform；检测、tracking、query、history、forecast head、loss 和参数量不变。`--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线。
 
 ## 1. 论文问题与最终主张
 
@@ -12,15 +8,15 @@ CMP 式中间融合把 receiver 对齐的多车 BEV 压缩为一张 fused BEV。
 
 > **面向当前状态估计的统一协同融合，不必然是面向运动预测的充分融合。协同感知与协同预测应共享对齐方式和 LiDAR 主干，但允许采用任务条件不同的证据聚合。**
 
-这不是“不使用 fused BEV”，也不是“每车独立检测后再跨车匹配”。CoLIF 保留 CMP FuseBEVT 作为唯一检测/跟踪测量路径，同时让 persistent actor query 从融合前、已经 receiver 对齐的 source BEV 中提取预测上下文。每个 receiver 始终只有一套物理 actor queries。
+CoLIF 使用 CMP FuseBEVT 作为唯一检测/跟踪测量路径，同时让 persistent actor query 从融合前、已经 receiver 对齐的 source BEV 中提取预测上下文。每个 receiver 始终只有一套物理 actor queries。
 
-当前由实验支持的三项方法组成是：
+当前已实现并进入验证的方法由三部分组成；其中 per-CAV 相对 fused-BEV 的增量价值仍以正式表示消融为准：
 
 1. **Perception/forecast fusion decoupling**：scene-level FuseBEVT 服务 detection/tracking，actor-conditioned source fusion 服务 forecasting；两者共享一套 PointPillar 特征，不增加第二个检测器。
 2. **Geometry-conditioned persistent actor forecasting**：actor query 根据 actor-to-sensor 相对位置、距离、方位和航向，从各 source BEV 局部 patch 中选择证据，再结合有序可变历史与 actor interaction 预测。
 3. **Motion-anchored multimodal prediction**：agent-specific CAV context 与有序历史、actor interaction 共同形成预测特征；六个速度尺度提供物理 anchors，网络预测有界残差和高斯分布参数。
 
-不再声称 future 改善 tracking。所有已测试 future-to-query、future-to-association 和 forecast missing-state propagation 均无正增益；正式配置固定 `future_prior_mode=none`，forecast 只读 persistent state，不写回 tracking。
+Forecast 路径只读 persistent state，不写回 tracking；正式配置固定 `future_prior_mode=none`。
 
 ## 2. 端到端在线架构
 
@@ -289,37 +285,20 @@ L_forecast = L_correlated_GMM_NLL(best mode)
 
 future mask 按真实有效 future step计算；全 mask actor 不贡献 forecast numerator/count。双卡先 all-reduce raw numerator 与 valid count 再归一，不能平均每卡 mean。
 
-## 10. 为什么只有两阶段
+## 10. 两阶段训练隔离
 
-三阶段曾用于“tracking → forecast → future反馈联合训练”，但反馈主张已被同权重消融否证。当前两阶段具有明确隔离作用：
+当前训练分为两个职责清晰的阶段：
 
 1. Phase 1建立稳定、strict-online、GT-free 的 actor set 与 history；
 2. Phase 2固定这一 actor set，只比较预测信息结构。
 
-这样 source/no-source 和 history/no-history 消融不会通过改变 tracking coverage 偷换样本。没有第三阶段，因为当前没有经实验证明需要 joint future-to-tracking fine-tuning 的模块。
+这一隔离保证 source/no-source 和 history/no-history 消融不会通过改变 tracking coverage 偷换样本。
 
 ## 11. 固定种子公平结果
 
-三组均从同一 Phase-1 epoch-1 checkpoint、seed 20、显式 DataLoader generator、相同 1710 clips、1 epoch/855 optimizer steps开始。三组均为 world size 2、0 AMP overflow、0 no-signal skip、DDP parameter/buffer checksum delta 0；MOTA、coverage、actor counts 完全相同。
+固定 seed-20 的 no-source、no-history 与完整主线实验已经验证 actor-source context 和 ordered history 的受控工程路径；精确配置、数值和限制只保存在 `LOG.md` 的对应日期条目中。
 
-| 配置 | minADE 1/3/5 s | minFDE 1/3/5 s | MOTA | Coverage |
-| --- | --- | --- | ---: | ---: |
-| 无 actor-source fusion | 1.1189 / 2.0404 / 2.7437 | 1.5749 / 3.0895 / 4.3980 | 0.6333 | 0.7894 |
-| actor-source，无 ordered history | 1.0504 / 1.9313 / 2.6535 | 1.4608 / 2.9931 / 4.3827 | 0.6333 | 0.7894 |
-| **actor-source + ordered history（默认）** | **0.9997 / 1.8472 / 2.5870** | **1.3708 / 2.9177 / 4.3804** | **0.6333** | **0.7894** |
-
-默认模型相对 no-source：
-
-- minADE 1/3/5 s 改善 10.65% / 9.47% / 5.71%；
-- minFDE 1/3/5 s 改善 12.96% / 5.56% / 0.40%。
-
-默认模型相对 no-history：
-
-- minADE 1/3/5 s 改善 4.82% / 4.35% / 2.50%；
-- minFDE 1/3 s 改善 6.16% / 2.52%；
-- minFDE5 只改善 0.05%，不能写成显著长时 endpoint gain。
-
-完整 receiver `[0,1]`、20 轮训练的当前主干在 epoch 19 达到 online-masked ADE1/3/5=`0.8515/1.4083/1.9350`、FDE1/3/5=`1.0310/2.1841/3.2465`，优于修改前 FDE5=`3.4273`。
+完整 receiver `[0,1]`、20 轮 per-CAV checkpoint 已通过 strict-online 评测，但它不能单独证明 per-CAV 表示优于协议匹配的 fused-BEV 表示。该核心增量价值仍以 `HANDOFF.md` 中的正式 fused/per-CAV 闸门为准。
 
 ## 12. CMP 对比边界
 
@@ -337,23 +316,9 @@ ADE5/FDE5 = 2.5870 / 4.3804 m
 
 数值分别低 41.21%/42.03%，但不能写成严格 apples-to-apples SOTA superiority：CMP tracking cache 已核实先用 GT IoU匹配过滤 detections，再携带 GT ID进入 AB3DMOT并重命名 track；CMP固定 history target population 也与 CoLIF strict-online evaluator 不同。论文只能写“各自已复现协议下数值低于 CMP reference”，同时披露 protocol difference。
 
-## 13. 正式训练命令
+## 13. 训练与评测入口
 
-```bash
-cd /home/qkb/Project/CoLIF
-ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/colif_actor_source_release \
-  --epochs 20 --batch-size 4 --workers 4 --eval-workers 2 \
-  --log-every 50 --receiver-ids 0,1
-```
-
-完整 Phase 1、resume、smoke、独立 eval 和 inference命令见 `docs/colif_training.md`。正式协议只用 official train 优化，固定末轮评测 official test；不建 val、不按 test 自动选择 best，repeated-test monitoring 必须在论文披露。
+可执行命令唯一由 `docs/colif_training.md` 维护。本文件只保留模型合同，不复制可能随配置、seed、资源或表示消融变化的命令。正式协议只用 official train 优化，固定末轮评测 official test；不建 val、不按 test 自动选择 best，repeated-test monitoring 必须在论文披露。
 
 ## 14. 代码复用与文件地图
 
@@ -383,10 +348,6 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 - GT-free runtime export：`inference_colif_v2v4real.py`
 - 正式 YAML：`opencood/hypes_yaml/colif/colif_v2v4real.yaml`
 
-### 14.3 历史实现
-
-旧 source-local observation、source memory、source refiner、forecast association 和 FutureAdapter 仅保留在 Git 历史或失败记录中，不能从历史实现反推正式模型主张。
-
 ## 15. 已验证的代码合同
 
 当前测试覆盖：
@@ -410,12 +371,11 @@ conda run --no-capture-output -n coop python -m pytest -q tests/colif
 
 ## 16. 结果与证据位置
 
-- 当前 20 轮无 refiner 权重：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`
+- 当前 20 轮 per-CAV 权重：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`
 - 当前 20 轮逐 epoch 评测：`opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/metrics_test.jsonl`
 - 一轮 agent-specific CAV fusion：`opencood/logs/colif_fused_v19_geometry_source_seedfixed_full_1epoch_20260813/`
 - no source：`opencood/logs/colif_fused_v18_no_actor_source_seedfixed_full_1epoch_20260813/`
 - no history：`opencood/logs/colif_fused_v22_no_temporal_history_seedfixed_full_1epoch_20260813/`
-- 完整失败记录：`docs/colif_failure_postmortem.md`
 - 训练说明：`docs/colif_training.md`
 - 当前论文草稿：`manuscript.md`
 
@@ -429,4 +389,4 @@ conda run --no-capture-output -n coop python -m pytest -q tests/colif
 4. partner-support/receiver-only/shared 分桶的置信区间或多 seed稳定性；
 5. 与相同 target population、相同 strict-online evaluator 下的可比基线。
 
-在这些证据完成前，投稿版本以 agent-specific CAV feature fusion 与 motion-anchored proposal 为唯一主模型；source refiner 不进入方法、主表或部署代码。
+在这些证据完成前，投稿版本以 agent-specific CAV feature fusion 与 motion-anchored proposal 为模型边界。

@@ -45,8 +45,8 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --phase 1 --batch-size 2 \
   --init-cobevt-checkpoint \
   pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
-  --output-dir opencood/logs/colif_fused_phase1_release \
-  --epochs 20 --workers 2 --eval-workers 2 --log-every 50
+  --output-dir opencood/logs/train-p1-s20 \
+  --epochs 20 --workers 2 --eval-workers 2 --seed 20 --log-every 50
 ```
 
 Phase 1 使用 FP32。当前三组公平预测实验共同使用的冻结 tracker 为：
@@ -69,8 +69,10 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --phase 2 \
   --init-colif-checkpoint \
   /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/colif_actor_source_release \
-  --epochs 20 --batch-size 4 --workers 4 --eval-workers 2 --log-every 50 --receiver-ids 0,1
+  --output-dir opencood/logs/train-percav-s20 \
+  --epochs 20 --batch-size 2 --grad-accum-steps 2 --workers 2 \
+  --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
+  --no-eval --log-every 50
 
 ```
 
@@ -110,6 +112,10 @@ opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.p
 
 只需新增一组 fused 20-epoch 训练：
 
+当前 seed-20 任务已经使用下面的历史长目录启动。为保证运行与恢复兼容，
+本轮不得在运行中改名；该例外不再用于新任务。后续新 run 使用紧凑 ID，
+例如 `train-fused-s42`、`train-percav-s42`、`train-fused-s2026`。
+
 ```bash
 ulimit -n 65536
 PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
@@ -143,6 +149,23 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 补 seed 42 与 2026。后续两种表示都从同一个 Phase-1 checkpoint 初始化，并仅
 修改 `--seed`、`--forecast-bev-representation` 和输出目录。最终报告三个 seed
 的 mean/std；不得按 test 结果选择 checkpoint。
+
+启动 seed 42/2026 前必须同时满足：seed-20 训练进程已退出；固定末轮 checkpoint
+存在且严格加载；独立 `online_masked` 完整评测已生成；overall、partner-only 与
+support counts 已和 per-CAV 结果按同一协议核对；方向闸门通过。任一项未验证就
+停止，不得提前并发下一 seed。
+
+每个新输出目录还必须在启动前通过命名与冲突检查：
+
+```bash
+python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
+  opencood/logs/train-fused-s42 --must-not-exist
+python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
+  opencood/logs/train-percav-s42 --must-not-exist
+```
+
+训练入口会创建或复用输出目录并追加日志，因此检查失败时必须改用新 run ID；
+恢复既有任务只能走第 5 节的显式 `--resume` 路径。
 
 关闭 ordered temporal history，但保留 robust velocity/dispersion 与 per-CAV
 fusion 的诊断命令为：
@@ -191,7 +214,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint /path/to/phase1_checkpoint.pth \
-  --output-dir opencood/logs/colif_smoke \
+  --output-dir opencood/logs/smoke-p2-percav-s20 \
   --epochs 1 --workers 2 --smoke-batches 5 --no-eval --log-every 1
 ```
 

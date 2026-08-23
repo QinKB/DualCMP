@@ -3,7 +3,7 @@
 ## Current
 
 - Repository: `/home/qkb/Project/CoLIF`.
-- Active question: whether aligned per-CAV BEV patches improve forecasting over a protocol-matched fused-BEV actor patch. The next action is the seed-20 fused 20-epoch run in `docs/colif_training.md` Section 4.
+- Active question: whether aligned per-CAV BEV patches improve forecasting over a protocol-matched fused-BEV actor patch.
 
 ## Knowledge
 
@@ -16,6 +16,7 @@
 - `--disable-actor-cooperative-fusion` is a no-context diagnostic, not a fused-BEV baseline. Using it to claim fused information loss is invalid.
 - Attention weights diagnose learned evidence allocation but do not establish that per-CAV features improve ADE/FDE.
 - Forecast representation comparisons must keep receiver IDs `[0,1]`, Phase-1 initialization, epoch count, batch/accumulation, metric protocol, tracker outputs, and actor support counts fixed.
+- New training output paths must not exist before launch because the trainer reuses directories and appends logs; use the explicit resume path for recovery.
 
 ## Open
 
