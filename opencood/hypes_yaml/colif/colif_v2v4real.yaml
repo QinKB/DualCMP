@@ -164,6 +164,8 @@ model:
       innovation_scale_m: 4.0
     actor_cooperative_fusion:
       enabled: true
+      # per_cav is DualCMP; fused is the protocol-matched forecast baseline.
+      representation: per_cav
       input_dim: 256
       heads: 8
       patch_radius_m: 4.0

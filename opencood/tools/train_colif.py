@@ -58,6 +58,11 @@ def _arguments():
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument(
+        "--seed",
+        type=int,
+        help="Override the training/data seed recorded in the checkpoint config",
+    )
+    parser.add_argument(
         "--receiver-ids",
         help="Comma-separated CAV IDs; use 0 for one ego or 0,1 for CMP-style multi-ego",
     )
@@ -82,6 +87,14 @@ def _arguments():
     )
     parser.add_argument("--no-eval", action="store_true")
     parser.add_argument("--disable-actor-cooperative-fusion", action="store_true")
+    parser.add_argument(
+        "--forecast-bev-representation",
+        choices=("per_cav", "fused"),
+        help=(
+            "Forecast-only spatial input: aligned per-CAV BEVs for DualCMP "
+            "or one fused-BEV actor patch for the controlled baseline"
+        ),
+    )
     parser.add_argument("--disable-temporal-history", action="store_true")
     parser.add_argument("--disable-proposal-refinement", action="store_true")
     parser.add_argument(
@@ -159,8 +172,17 @@ def main() -> None:
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     hypes = load_yaml(args.hypes_yaml)
     receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
+    if args.seed is not None:
+        if args.seed < 0:
+            raise ValueError("--seed must be non-negative")
+        hypes["train_params"]["seed"] = int(args.seed)
+        hypes.setdefault("wild_setting", {})["seed"] = int(args.seed)
     if args.disable_actor_cooperative_fusion:
         hypes["model"]["args"]["actor_cooperative_fusion"]["enabled"] = False
+    if args.forecast_bev_representation is not None:
+        hypes["model"]["args"]["actor_cooperative_fusion"][
+            "representation"
+        ] = args.forecast_bev_representation
     if args.disable_temporal_history:
         hypes["model"]["args"]["forecast"]["temporal_history"] = False
     if args.disable_proposal_refinement:
@@ -325,6 +347,7 @@ def main() -> None:
             "loss_clip_length": int(dataset.unroll_length),
             "warmup_length": int(dataset.warmup_length),
             "phase2_future_prior_mode": active_future_prior_mode,
+            "seed": seed,
             "grad_accum_steps": grad_accum_steps,
             "updates_per_epoch": updates_per_epoch,
             "world_size": world_size,

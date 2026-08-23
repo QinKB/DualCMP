@@ -29,6 +29,44 @@ from opencood.models.colif.query_geometry import (
 )
 
 
+FORECAST_BEV_REPRESENTATIONS = ("per_cav", "fused")
+
+
+def select_forecast_bev_sources(
+    representation: str,
+    encoded: dict,
+    source_to_receiver: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """Select spatial evidence only for the forecast reader.
+
+    Tracking always consumes ``encoded['fused_bev']`` before this selection.
+    The fused ablation therefore changes forecast evidence without changing
+    measurements, query identities, or histories.
+    """
+
+    representation = str(representation)
+    if representation == "per_cav":
+        return (
+            encoded["regrouped_source_bev"],
+            encoded["cav_mask"].bool(),
+            source_to_receiver,
+        )
+    if representation == "fused":
+        fused_bev = encoded["fused_bev"]
+        batch = fused_bev.shape[0]
+        cav_mask = torch.ones(
+            batch, 1, dtype=torch.bool, device=fused_bev.device
+        )
+        identity = torch.eye(
+            4, dtype=fused_bev.dtype, device=fused_bev.device
+        ).view(1, 1, 4, 4).expand(batch, 1, 4, 4)
+        return fused_bev.unsqueeze(1), cav_mask, identity
+    raise ValueError(
+        "actor_cooperative_fusion.representation must be one of %s"
+        % (FORECAST_BEV_REPRESENTATIONS,)
+    )
+
+
 class PointPillarColif(nn.Module):
     """Online receiver-centric model whose forward contract is supervision-free."""
 
@@ -62,6 +100,14 @@ class PointPillarColif(nn.Module):
         self.actor_cooperative_fusion_enabled = bool(
             cooperative_args.get("enabled", True)
         )
+        self.forecast_bev_representation = str(
+            cooperative_args.get("representation", "per_cav")
+        )
+        if self.forecast_bev_representation not in FORECAST_BEV_REPRESENTATIONS:
+            raise ValueError(
+                "actor_cooperative_fusion.representation must be one of %s"
+                % (FORECAST_BEV_REPRESENTATIONS,)
+            )
         self.actor_cooperative_fusion = ActorConditionedCooperativeFusion(
             input_dim=int(cooperative_args.get("input_dim", 256)),
             query_dim=self.query_dim,
@@ -591,6 +637,15 @@ class PointPillarColif(nn.Module):
     ):
         encoded = self.cobevt.encode_fused_bev(runtime_frame)
         fused_bev = encoded["fused_bev"]
+        (
+            forecast_source_bev,
+            forecast_cav_mask,
+            forecast_source_to_receiver,
+        ) = select_forecast_bev_sources(
+            self.forecast_bev_representation,
+            encoded,
+            runtime_frame.get("source_to_receiver"),
+        )
         auxiliary_psm = self.cobevt.cls_head(fused_bev)
         auxiliary_rm = self.cobevt.reg_head(fused_bev)
         batch_size = fused_bev.shape[0]
@@ -682,14 +737,12 @@ class PointPillarColif(nn.Module):
         if run_forecast and self.forecast_head.enabled:
             if self.actor_cooperative_fusion_enabled:
                 cooperative = self.actor_cooperative_fusion(
-                    encoded["regrouped_source_bev"],
-                    encoded["cav_mask"],
+                    forecast_source_bev,
+                    forecast_cav_mask,
                     next_state.query_feat,
                     next_state.ref_box,
                     next_state.active_mask,
-                    source_to_receiver=runtime_frame.get(
-                        "source_to_receiver"
-                    ),
+                    source_to_receiver=forecast_source_to_receiver,
                 )
             else:
                 cooperative = {
@@ -697,7 +750,7 @@ class PointPillarColif(nn.Module):
                     "attention_weights": next_state.query_feat.new_zeros(
                         next_state.query_feat.shape[0],
                         next_state.query_feat.shape[1],
-                        encoded["cav_mask"].shape[1],
+                        forecast_cav_mask.shape[1],
                         self.actor_cooperative_fusion.patch_size ** 2,
                     ),
                 }
@@ -716,7 +769,7 @@ class PointPillarColif(nn.Module):
                 "attention_weights": next_state.query_feat.new_zeros(
                     next_state.query_feat.shape[0],
                     next_state.query_feat.shape[1],
-                    encoded["cav_mask"].shape[1],
+                    forecast_cav_mask.shape[1],
                     self.actor_cooperative_fusion.patch_size ** 2,
                 ),
             }
@@ -826,6 +879,7 @@ class PointPillarColif(nn.Module):
                 "attention_weights"
             ],
             "cav_mask": encoded["cav_mask"],
+            "forecast_cav_mask": forecast_cav_mask,
             "cv_propagated_box": cv_propagated_box,
             "propagated_box": spatial_prior.predicted_box,
             "propagated_velocity": spatial_prior.predicted_velocity,

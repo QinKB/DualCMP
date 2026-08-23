@@ -83,16 +83,69 @@ online-masked FDE@1/3/5s = 1.0310 / 2.1841 / 3.2465 m
 MOTA=0.6504, forecast coverage=0.8049
 ```
 
-## 4. 公平消融命令
+## 4. 最小必要的 fused-BEV / per-CAV BEV 对照
 
-关闭 actor-source fusion：
+`--disable-actor-cooperative-fusion` 会把预测上下文置零，它只能作为
+no-context 诊断，不能作为 fused-BEV 基线。正式表示消融必须保持同一个
+actor reader、forecast head、tracker 和训练协议，只改变预测端空间输入：
 
 ```bash
-# 在 Phase 2 命令基础上添加
---disable-actor-cooperative-fusion
+# fused-BEV actor patch
+--forecast-bev-representation fused
+
+# DualCMP aligned per-CAV actor patches
+--forecast-bev-representation per_cav
 ```
 
-关闭 ordered temporal history，但保留 robust velocity/dispersion 与 actor-source fusion：
+两种模式的总参数量相同。fused 模式把 `fused_bev.unsqueeze(1)` 作为唯一
+receiver-frame source；per_cav 模式使用
+`regrouped_source_bev[B,L,C,H,W]`。检测、跟踪、query、history、motion
+anchors 和 loss 均保持不变。
+
+先运行 seed-20 闸门。已有 per-CAV checkpoint 为：
+
+```text
+opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth
+```
+
+只需新增一组 fused 20-epoch 训练：
+
+```bash
+ulimit -n 65536
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --init-colif-checkpoint \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823 \
+  --epochs 20 --batch-size 2 --grad-accum-steps 2 --workers 2 \
+  --receiver-ids 0,1 --forecast-bev-representation fused --seed 20 \
+  --no-eval --log-every 50
+```
+
+固定末轮独立评测：
+
+```bash
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 \
+  -m opencood.tools.eval_colif_v2v4real \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --checkpoint \
+  opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/checkpoint_epoch_019.pth \
+  --split test --workers 2 --receiver-ids 0,1 \
+  --forecast-metric-protocol online_masked \
+  --output \
+  opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/metrics_test_online_masked.json
+```
+
+只有 seed 20 中 per-CAV 的整体和 partner-only ADE/FDE 方向优于 fused，才继续
+补 seed 42 与 2026。后续两种表示都从同一个 Phase-1 checkpoint 初始化，并仅
+修改 `--seed`、`--forecast-bev-representation` 和输出目录。最终报告三个 seed
+的 mean/std；不得按 test 结果选择 checkpoint。
+
+关闭 ordered temporal history，但保留 robust velocity/dispersion 与 per-CAV
+fusion 的诊断命令为：
 
 ```bash
 # 在 Phase 2 命令基础上添加

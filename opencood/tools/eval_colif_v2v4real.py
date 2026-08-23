@@ -216,6 +216,9 @@ def main():
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "checkpoint_epoch": payload.get("epoch"),
         "checkpoint_global_step": payload.get("global_step"),
+        "forecast_bev_representation": getattr(
+            model, "forecast_bev_representation", "per_cav"
+        ),
         "world_size": world_size,
         "receiver_ids": list(receiver_ids),
         "max_frames_per_rank": args.max_frames_per_rank,

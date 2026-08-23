@@ -133,6 +133,9 @@ def configure_trainable_phase(model, phase: int) -> dict:
     return {
         "phase": phase,
         "forecast_enabled": model.forecast_head.enabled,
+        "forecast_bev_representation": getattr(
+            model, "forecast_bev_representation", "per_cav"
+        ),
         "future_adapter_mode": model.future_adapter.mode,
         "future_prior_mode": model.forecast_motion_prior.mode,
         "trainable_parameters": sum(
