@@ -2,6 +2,8 @@
 
 > **2026-08-22 更新：** source/trajectory refiner 已从模型、损失、训练入口和测试中删除。当前模型只有一条预测主线：fused BEV 用于检测与 persistent tracking，receiver-aligned per-CAV BEV 用于 agent-specific feature fusion，随后直接进入 motion-anchored multimodal decoder。旧 wrapper 中的 20 轮 proposal 权重已无损提取到当前结构，online-masked FDE5=`3.2465`。
 
+> **2026-08-23 消融合同：** 主模型默认 `actor_cooperative_fusion.representation=per_cav`。`fused` 模式只把预测 reader 的输入替换为 `fused_bev.unsqueeze(1)` 与 receiver-frame identity transform；检测、tracking、query、history、forecast head、loss 和参数量不变。`--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线。
+
 > 本文件只描述当前可运行模型；已放弃的 source refiner、future feedback 和旧三阶段方案仅保留在 Git 历史与 `HANDOFF.md` 中。
 
 ## 1. 论文问题与最终主张
@@ -152,6 +154,15 @@ Forecast distribution 不参与以上 association、reference propagation 或 ex
 - birth 帧不输出长时 forecast；至少两次因果观测才有速度依据并进入 forecasting。
 
 ## 6. Actor-Conditioned Source Fusion
+
+### 6.1 主表示与受控基线
+
+正式 DualCMP 使用 `per_cav`，即 receiver-aligned source BEV 与对应
+actor--source geometry。协议匹配的 `fused` 基线仍执行同一个
+`ActorConditionedCooperativeFusion`，但只把 fused BEV 作为一个位于 receiver
+原点的 source。该选择发生在 fused BEV 已完成 detection/tracking 之后，因此
+不会改变 measurements、actor queries、identities 或 histories。两种模式的模型
+参数完全相同；它们只检验预测端保留 source 维是否提供增量价值。
 
 对每个 active actor，在每张 receiver-aligned source BEV 上以当前 box center采样 `3×3` patch，覆盖半径 4 m。每个 token包含：
 

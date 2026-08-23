@@ -1,12 +1,34 @@
 # HANDOFF
 
-## 2026-08-23 最小必要 fused-BEV / per-CAV BEV 表示消融
+## Current
 
-- 现有 `--disable-actor-cooperative-fusion` 只把 `cooperative_context` 置零，不是 fused-BEV 预测基线。新增 `--forecast-bev-representation {fused,per_cav}`：两种模式共用同一个 `ActorConditionedCooperativeFusion`、forecast head、fused tracker、query、history、loss 和训练协议；`fused` 输入 `fused_bev.unsqueeze(1)` 及 receiver-frame identity transform，`per_cav` 输入 receiver-aligned `regrouped_source_bev`。两种模型总参数均为 195,675,723，Phase-2 可训练参数均为 4,754,680。
-- 新增 `--seed`，同步覆盖 `train_params.seed` 与 `wild_setting.seed`，并将 seed 和预测 BEV 表示写入训练日志/checkpoint config；独立 evaluator 输出 `forecast_bev_representation`，防止结果混报。旧 epoch-19 core checkpoint 缺省解析为 `per_cav`，严格加载为 0 missing / 0 unexpected。
-- fused 双卡真实 smoke 使用 receiver `[0,1]`、batch 2、grad accumulation 2、2 个真实 micro-batch：forward/loss/backward/optimizer 全部完成，unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0。smoke checkpoint 记录 `seed=20`、`representation=fused`，严格加载和两卡截断 strict-online evaluator 均通过；截断指标没有统计意义。
-- 最小实验顺序：先只训练 seed-20 fused 20 epochs，与已有 seed-20 per-CAV epoch-19 比较 overall 及 receiver-only/partner-only/shared ADE/FDE；若 per-CAV 没有方向性优势则停止并拒绝 Dual 必要性主张。只有闸门通过才补 fused/per-CAV 的 seeds 42、2026，共形成三 seed mean/std。完整命令已写入 `docs/colif_training.md` 第4节。
-- 验证：`tests/colif` 135 passed（16 个既有 warning）；CLI help、py_compile、`git diff --check` 通过。
+- 当前目标是检验 per-CAV BEV 是否相对 fused-BEV actor patch 提供增量预测价值；下一步只运行 seed-20 fused 20-epoch 闸门。规范命令见 `docs/colif_training.md` 第4节。
+- 当前主模型仍为 `per_cav`；`fused` 仅是保持 tracker、query、history、forecast head 和参数量不变的预测表示对照。
+
+## Verified
+
+- `--forecast-bev-representation {fused,per_cav}` 与 `--seed` 已接入训练、checkpoint config 和 evaluator。两种表示总参数均为 195,675,723，Phase-2 可训练参数均为 4,754,680。
+- fused 双卡真实 smoke 完成 forward/loss/backward/optimizer，unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0；smoke checkpoint 严格加载及截断 strict-online evaluator 均通过。
+- 旧 epoch-19 core checkpoint 缺省解析为 `per_cav`，严格加载为 0 missing / 0 unexpected。完整 `tests/colif` 为 135 passed（16 个既有 warning）。
+
+## Open
+
+- 尚未运行 seed-20 fused 20-epoch 正式训练，因此 fused-vs-per-CAV 的必要性仍未验证。
+- 只有 seed 20 的 overall 与 partner-only ADE/FDE 支持 per-CAV，才补两种表示的 seeds 42、2026；否则停止并拒绝 Dual 必要性主张。
+
+## Risks
+
+- `--disable-actor-cooperative-fusion` 会把预测 context 置零，不是 fused-BEV 基线；不得用其结果声称 fused 信息不足。
+- 注意力图只支持内部证据分配诊断，不能替代 fused-vs-per-CAV 因果消融。
+
+## Checkpoints
+
+| ID | Commit | Outcome | Validation | Risk / next |
+| --- | --- | --- | --- | --- |
+| CP-20260823-01 | `739842a` | 公平 fused/per-CAV 预测表示开关与 seed CLI | 135 tests；双卡训练/评测 smoke | 运行 seed-20 fused 20 epochs |
+| CP-20260822-01 | `ef008c5` | epoch-19 权重注意力图和全量统计 | 3,986 frames；52,597 records | 图不构成精度因果证据 |
+
+## Historical Record
 
 ## 2026-08-22 基于 epoch-19 权重生成 DualCMP 注意力图
 
