@@ -16,7 +16,7 @@
 - `--disable-actor-cooperative-fusion` is a no-context diagnostic, not a fused-BEV baseline. Using it to claim fused information loss is invalid.
 - Attention weights diagnose learned evidence allocation but do not establish that per-CAV features improve ADE/FDE.
 - Forecast representation comparisons must keep receiver IDs `[0,1]`, Phase-1 initialization, epoch count, batch/accumulation, metric protocol, tracker outputs, and actor support counts fixed.
-- New training output paths must not exist before launch because the trainer reuses directories and appends logs; use the explicit resume path for recovery.
+- New experiment IDs follow `<stage>-<variant>[-sN][-rN]`. Validate a proposed path with `check_run_id.py`, repeat with `--must-not-exist` before launch because the trainer appends to existing directories, and use explicit resume without renaming for an existing run.
 
 ## Open
 
