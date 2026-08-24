@@ -9,6 +9,7 @@
 - 当前最小恢复链为：Phase-1 epoch-9 初始化、per-CAV core epoch-19、per-CAV train/metrics JSONL、活动 fused seed-20 目录、CMP/MTR 两个官方预测权重和 CoBEVT 预训练权重。精确路径由 `docs/colif_training.md` 维护。
 - 保留权重 SHA-256：CoBEVT `60e9e84e...9c920b`；Phase-1 epoch-9 `6c585b69...5bd3b`；per-CAV core epoch-19 `ef6c94af...6be43c`；CMP MTR aggregation `39951eea...4dc12`；MTR no-aggregation `213683c4...d1356`。
 - 删除的二进制 checkpoint 不在 Git 中，不能从仓库恢复；其已验证结论仍保留在失败复盘或历史 Git 版本中。未来训练不得从这些旧 checkpoint 恢复。
+- CoLIF 清理检查点：`CP-20260824-04` / `f40c26b`。独立 MOTR 依赖仓库删除其历史受跟踪 bytecode 并忽略生成物：`CP-20260824-01` / `42e26ec`。
 
 ## 2026-08-24 — 全稿证据审计
 
