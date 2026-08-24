@@ -371,13 +371,15 @@ conda run --no-capture-output -n coop python -m pytest -q tests/colif
 
 ## 16. 结果与证据位置
 
+- 当前 Phase-1 初始化：`opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth`
 - 当前 20 轮 per-CAV 权重：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`
 - 当前 20 轮逐 epoch 评测：`opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/metrics_test.jsonl`
-- 一轮 agent-specific CAV fusion：`opencood/logs/colif_fused_v19_geometry_source_seedfixed_full_1epoch_20260813/`
-- no source：`opencood/logs/colif_fused_v18_no_actor_source_seedfixed_full_1epoch_20260813/`
-- no history：`opencood/logs/colif_fused_v22_no_temporal_history_seedfixed_full_1epoch_20260813/`
+- 当前 fused seed-20 训练：`opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/`
+- 注意力原始记录与复现元数据：`figures/dualcmp_attention_records.npz`、`figures/dualcmp_attention_summary.json`
 - 训练说明：`docs/colif_training.md`
 - 当前论文草稿：`manuscript.md`
+
+旧 phase、smoke、profile、single-receiver、no-source/no-history 与 source-refiner 运行目录已经清理。它们只描述被拒绝或与当前协议不兼容的历史路线，未来实验不得从这些 checkpoint 恢复。
 
 ## 17. 投稿前仍需补的证据
 

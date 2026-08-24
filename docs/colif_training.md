@@ -9,6 +9,25 @@ Phase 2: 冻结感知/跟踪，训练cooperative motion forecast
 
 正式协议为 official `train` 优化、固定末轮自动评测 official `test`；不构造 val、不按 test 指标自动选择 best。论文必须披露 repeated-test monitoring。
 
+## 当前最小资产集
+
+项目只保留当前训练、评测和投稿实验仍会使用的权重与原始指标：
+
+```text
+pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth
+opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth
+opencood/logs/colif_paper_phase1_20e_seed20/{train_log,metrics_test}.jsonl
+opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth
+opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/{train_log,metrics_test}.jsonl
+opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/
+MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth
+MTR/output/v2v4real_multiego_cobevt_c256_no_agg/ckpt/best_model.pth
+```
+
+最后一个 `opencood` 目录是正在运行的 fused seed-20 任务，完成独立评测前必须保留目录、训练日志和最新完整 checkpoint；更早的完整 epoch 权重可以在验证最新恢复点后清理。其余历史 phase、smoke、profile、旧 refiner、single-receiver 和旧协议 checkpoint 已从工作区删除；需要追溯时使用 Git 历史中的 `LOG.md`，不能把历史结果恢复为当前论文证据。
+
+`preprocessed_data/v2v4real/fused_features_point_pillar_cobevt_multiego_256x` 约 105 GiB，但它不是日志或冗余权重。当前 MTR/CMP 配置直接把它作为 `cobevt_fused_features_dir`，投稿前尚需完成 learned baselines，因此暂时保留；删除后必须重新提取整套 fused features。相关 tracking/GT caches 同理保留到 MTR/CMP 协议对照结束。
+
 ## Receiver / ego 协议
 
 默认 `receiver_ids: [0]`，即只以 CAV 0 为 receiver。若要严格采用 CMP 的 multi-ego 数据增广，在 **Phase 1、Phase 2、独立评测与推理** 命令中均添加：
@@ -49,13 +68,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   --epochs 20 --workers 2 --eval-workers 2 --seed 20 --log-every 50
 ```
 
-Phase 1 使用 FP32。当前三组公平预测实验共同使用的冻结 tracker 为：
-
-```text
-opencood/logs/colif_fused_v7_phase1_predict_correct_2epoch_20260812/checkpoint_epoch_001.pth
-```
-
-该 checkpoint 为 epoch 1 固定末轮，不是按 test 挑选。
+Phase 1 使用 FP32。当前论文实验统一从第 3 节所列的 seed-20 epoch-9 Phase-1 checkpoint 初始化；旧单轮诊断使用的 tracker 已清理，不能与当前 receiver `[0,1]`、20-epoch 协议混用。
 
 ## 3. Phase 2：agent-specific CAV feature fusion
 
@@ -167,27 +180,7 @@ python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
 训练入口会创建或复用输出目录并追加日志，因此检查失败时必须改用新 run ID；
 恢复既有任务只能走第 5 节的显式 `--resume` 路径。
 
-关闭 ordered temporal history，但保留 robust velocity/dispersion 与 per-CAV
-fusion 的诊断命令为：
-
-```bash
-# 在 Phase 2 命令基础上添加
---disable-temporal-history
-```
-
-对应完整结果：
-
-```text
-no source:
-  opencood/logs/colif_fused_v18_no_actor_source_seedfixed_full_1epoch_20260813/
-  ADE5/FDE5=2.7437/4.3980 m
-
-no ordered history:
-  opencood/logs/colif_fused_v22_no_temporal_history_seedfixed_full_1epoch_20260813/
-  ADE5/FDE5=2.6535/4.3827 m
-```
-
-训练器使用独立 `torch.Generator(seed+rank)` 和 worker seed，数据随机性不再受模型参数初始化顺序影响。三组的 MOTA、coverage、actor counts 完全相同，证明预测消融没有改变冻结 tracker。
+旧 one-epoch no-source/no-history 诊断属于早期 single-receiver 研究阶段，既不进入当前论文表格，也不能替代 fused/per-CAV 表示消融；其日志和 checkpoint 已清理。若未来重新研究 ordered history，必须从当前 Phase-1 checkpoint 按 receiver `[0,1]` 和 20-epoch 协议重新训练。
 
 ## 5. 同阶段断点恢复
 

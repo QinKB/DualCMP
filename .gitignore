@@ -16,7 +16,8 @@ preprocessed_data/v2v4real/tracking_trajs_*/
 preprocessed_data/v2v4real/*_detection_result_for_tracking_*.pkl
 preprocessed_data/v2v4real/*_tracking_result_for_prediction_*.pkl
 results/*
-opencood/logs/point_pillar_cobevt_v2v4real_*
+opencood/logs/*
+third_party/
 
 # Interpreter-specific native-extension build outputs.
 *.cpython-*.so
