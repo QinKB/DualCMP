@@ -2,6 +2,13 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-25 — fused闸门与必要消融开关
+
+- seed-20 fused epoch-19在相同3,986 frames、52,597 matched forecasts和support counts下取得ADE@1/3/5s=`0.854988/1.428909/1.972203`、FDE=`1.044122/2.209837/3.278118`；per-CAV在六个ADE/FDE、三档MR及receiver-only/partner-only/shared 5 s ADE/FDE上方向均更优。
+- fused目录已只保留epoch-19、`train_log.jsonl`和`metrics_test_online_masked.json`；epoch 10--18中间权重已删除且不可从Git恢复。
+- `CP-20260825-01` / `14cc0a9`增加uniform mean、query attention without geometry和direct trajectory开关。141 tests通过；三种模式双卡optimizer smoke均为unused trainable=0、AMP overflow=0、parameter/buffer checksum delta=0；既有per-CAV/fused checkpoint strict load均为0 missing/unexpected。
+- 三个正式20轮命令唯一维护在`docs/colif_training.md`第5节；结果完成前不得填写论文消融表。
+
 ## 2026-08-24 — 工作区资产收敛
 
 - `opencood/logs` 清理前有 158 个运行目录、约 233.58 GiB；其中绝大部分是旧 phase、smoke、profile、single-receiver、失败结构和已删除 source-refiner 的完整 checkpoint，而不是文本日志。

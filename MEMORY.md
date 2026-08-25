@@ -3,13 +3,14 @@
 ## Current
 
 - Repository: `/home/qkb/Project/CoLIF`.
-- Active question: whether aligned per-CAV BEV patches improve forecasting over a protocol-matched fused-BEV actor patch.
+- Active question: how source preservation, query weighting, relative geometry, and motion anchors contribute under one fixed online protocol.
 
 ## Knowledge
 
 - Current architecture and tensor contracts are canonical in `model_design.md`; runnable training/evaluation commands are canonical in `docs/colif_training.md`.
 - Main inference uses `actor_cooperative_fusion.representation=per_cav`. The `fused` ablation changes only forecast spatial evidence after fused tracking and has identical model/trainable parameter counts.
-- Recoverable implementation checkpoint: `CP-20260823-01` / `739842a`. Existing per-CAV seed-20 checkpoint: `opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`.
+- Controlled source ablations use `aggregation={attention,mean}` and `geometry_conditioning={true,false}`; the motion-anchor ablation uses `trajectory_parameterization={anchored,direct}` with an identical parameter schema.
+- Recoverable implementation checkpoint: `CP-20260825-01` / `14cc0a9`. Existing per-CAV seed-20 checkpoint: `opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`.
 
 ## Lessons
 
@@ -20,5 +21,4 @@
 
 ## Open
 
-- Unverified: seed-20 fused 20-epoch metrics and the direction of overall/partner-only ADE/FDE relative to per-CAV.
-- If seed 20 supports per-CAV, repeat fused/per-CAV for seeds 42 and 2026; otherwise remove the Dual necessity claim.
+- Unverified: uniform mean, query attention without geometry, and direct trajectory 20-epoch results.
