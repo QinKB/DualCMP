@@ -219,6 +219,19 @@ def main():
         "forecast_bev_representation": getattr(
             model, "forecast_bev_representation", "per_cav"
         ),
+        "source_aggregation": getattr(
+            model, "source_aggregation", "attention"
+        ),
+        "source_geometry": (
+            "on"
+            if getattr(model, "source_geometry_conditioning", False)
+            else "off"
+        ),
+        "trajectory_parameterization": getattr(
+            model.forecast_head,
+            "trajectory_parameterization",
+            None,
+        ),
         "world_size": world_size,
         "receiver_ids": list(receiver_ids),
         "max_frames_per_rank": args.max_frames_per_rank,

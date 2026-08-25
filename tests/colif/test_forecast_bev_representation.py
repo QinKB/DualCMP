@@ -55,7 +55,7 @@ def test_forecast_representation_rejects_unknown_mode():
         select_forecast_bev_sources("unknown", _encoded(), None)
 
 
-def test_train_cli_accepts_seed_and_forecast_representation(monkeypatch):
+def test_train_cli_accepts_forecast_ablation_switches(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -66,6 +66,12 @@ def test_train_cli_accepts_seed_and_forecast_representation(monkeypatch):
             "42",
             "--forecast-bev-representation",
             "fused",
+            "--source-aggregation",
+            "mean",
+            "--source-geometry",
+            "off",
+            "--forecast-trajectory-parameterization",
+            "direct",
         ],
     )
 
@@ -73,3 +79,43 @@ def test_train_cli_accepts_seed_and_forecast_representation(monkeypatch):
 
     assert args.seed == 42
     assert args.forecast_bev_representation == "fused"
+    assert args.source_aggregation == "mean"
+    assert args.source_geometry == "off"
+    assert args.forecast_trajectory_parameterization == "direct"
+
+
+def test_forecast_ablation_cli_overrides_checkpoint_configuration(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_colif",
+            "--hypes_yaml",
+            "config.yaml",
+            "--source-aggregation",
+            "mean",
+            "--source-geometry",
+            "off",
+            "--forecast-trajectory-parameterization",
+            "direct",
+        ],
+    )
+    args = train_colif._arguments()
+    hypes = {
+        "model": {
+            "args": {
+                "actor_cooperative_fusion": {
+                    "aggregation": "attention",
+                    "geometry_conditioning": True,
+                },
+                "forecast": {"trajectory_parameterization": "anchored"},
+            }
+        }
+    }
+
+    train_colif._apply_forecast_ablation_overrides(hypes, args)
+
+    cooperative = hypes["model"]["args"]["actor_cooperative_fusion"]
+    forecast = hypes["model"]["args"]["forecast"]
+    assert cooperative["aggregation"] == "mean"
+    assert cooperative["geometry_conditioning"] is False
+    assert forecast["trajectory_parameterization"] == "direct"

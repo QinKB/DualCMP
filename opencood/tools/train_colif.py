@@ -95,6 +95,21 @@ def _arguments():
             "or one fused-BEV actor patch for the controlled baseline"
         ),
     )
+    parser.add_argument(
+        "--source-aggregation",
+        choices=("attention", "mean"),
+        help="Forecast source aggregation: actor-query attention or uniform mean",
+    )
+    parser.add_argument(
+        "--source-geometry",
+        choices=("on", "off"),
+        help="Enable or disable relative actor--CAV geometry in source tokens",
+    )
+    parser.add_argument(
+        "--forecast-trajectory-parameterization",
+        choices=("anchored", "direct"),
+        help="Predict bounded residuals around motion anchors or direct displacements",
+    )
     parser.add_argument("--disable-temporal-history", action="store_true")
     parser.add_argument("--disable-proposal-refinement", action="store_true")
     parser.add_argument(
@@ -118,6 +133,19 @@ def _seed_data_worker(_worker_id: int) -> None:
     worker_seed = torch.initial_seed() % (2 ** 32)
     random.seed(worker_seed)
     np.random.seed(worker_seed)
+
+
+def _apply_forecast_ablation_overrides(hypes: dict, args) -> None:
+    cooperative = hypes["model"]["args"]["actor_cooperative_fusion"]
+    forecast = hypes["model"]["args"]["forecast"]
+    if args.source_aggregation is not None:
+        cooperative["aggregation"] = args.source_aggregation
+    if args.source_geometry is not None:
+        cooperative["geometry_conditioning"] = args.source_geometry == "on"
+    if args.forecast_trajectory_parameterization is not None:
+        forecast["trajectory_parameterization"] = (
+            args.forecast_trajectory_parameterization
+        )
 
 
 def _ddp_parameter_sync_report(model, device):
@@ -183,6 +211,7 @@ def main() -> None:
         hypes["model"]["args"]["actor_cooperative_fusion"][
             "representation"
         ] = args.forecast_bev_representation
+    _apply_forecast_ablation_overrides(hypes, args)
     if args.disable_temporal_history:
         hypes["model"]["args"]["forecast"]["temporal_history"] = False
     if args.disable_proposal_refinement:
@@ -327,6 +356,18 @@ def main() -> None:
     # ranks enter different collective-call counts and deadlock in forward.
     # DDP broadcasts rank-0 running buffers at each clip boundary instead.
     phase_report = configure_trainable_phase(model, phase)
+    phase_report.update({
+        "forecast_bev_representation": model.forecast_bev_representation,
+        "source_aggregation": model.source_aggregation,
+        "source_geometry": (
+            "on" if model.source_geometry_conditioning else "off"
+        ),
+        "trajectory_parameterization": getattr(
+            model.forecast_head,
+            "trajectory_parameterization",
+            None,
+        ),
+    })
     log_record({"phase_configuration": phase_report})
     criterion = train_utils.create_loss(hypes).to(device)
     optimizer = build_colif_optimizer(hypes, model)

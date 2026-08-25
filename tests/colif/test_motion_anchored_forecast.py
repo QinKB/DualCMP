@@ -9,6 +9,7 @@ def _head(
     mode_interaction="actor_conditioned",
     temporal_history=True,
     proposal_refinement=True,
+    trajectory_parameterization="anchored",
 ):
     return MotionAnchoredForecastHead(
         16,
@@ -26,6 +27,7 @@ def _head(
             "history_encoder_layers": 1,
             "history_encoder_heads": 4,
             "proposal_refinement": proposal_refinement,
+            "trajectory_parameterization": trajectory_parameterization,
         },
     )
 
@@ -67,6 +69,56 @@ def test_zero_residual_initialization_equals_multiscale_robust_motion():
     )
     torch.testing.assert_close(final, expected)
     assert output["forecast_loss_in_receiver_frame"] is True
+
+
+def test_direct_parameterization_starts_from_zero_displacement() -> None:
+    head = _head(trajectory_parameterization="direct").eval()
+    query = torch.zeros(1, 1, 16)
+    boxes = torch.zeros(1, 1, 7)
+    history = torch.zeros(1, 1, 11, 7)
+    mask = torch.zeros(1, 1, 11, dtype=torch.bool)
+    mask[..., -3:] = True
+    history[0, 0, -3:, 0] = torch.tensor([0.0, 0.2, 0.4])
+
+    output = head(
+        query,
+        boxes,
+        torch.ones(1, 1, dtype=torch.bool),
+        history,
+        mask,
+        torch.zeros(1),
+    )
+
+    assert output["forecast_valid_mask"].all()
+    assert torch.count_nonzero(output["pred_trajs"][..., :2]) == 0
+
+
+def test_direct_parameterization_is_not_limited_by_anchor_residual_bound() -> None:
+    anchored = _head(trajectory_parameterization="anchored").eval()
+    direct = _head(trajectory_parameterization="direct").eval()
+    direct.load_state_dict(anchored.state_dict(), strict=True)
+    with torch.no_grad():
+        anchored.proposal_residual_head.bias.fill_(20.0)
+        direct.proposal_residual_head.bias.fill_(20.0)
+    query = torch.zeros(1, 1, 16)
+    boxes = torch.zeros(1, 1, 7)
+    history = torch.zeros(1, 1, 11, 7)
+    mask = torch.zeros(1, 1, 11, dtype=torch.bool)
+    mask[..., -3:] = True
+    inputs = (
+        query,
+        boxes,
+        torch.ones(1, 1, dtype=torch.bool),
+        history,
+        mask,
+        torch.zeros(1),
+    )
+
+    anchored_xy = anchored(*inputs)["pred_trajs"][..., :2]
+    direct_xy = direct(*inputs)["pred_trajs"][..., :2]
+
+    assert float(anchored_xy.abs().max()) < anchored.residual_limit_m
+    torch.testing.assert_close(direct_xy, torch.full_like(direct_xy, 20.0))
 
 
 def test_future_loss_reaches_residual_context_and_mode_heads():

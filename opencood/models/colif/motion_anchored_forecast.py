@@ -37,8 +37,15 @@ class MotionAnchoredForecastHead(nn.Module):
         self.mode_interaction = str(
             args.get("mode_interaction", "additive")
         )
+        self.trajectory_parameterization = str(
+            args.get("trajectory_parameterization", "anchored")
+        )
         if self.mode_interaction not in ("additive", "actor_conditioned"):
             raise ValueError("Unsupported motion-anchor mode interaction")
+        if self.trajectory_parameterization not in ("anchored", "direct"):
+            raise ValueError(
+                "trajectory_parameterization must be anchored or direct"
+            )
         if self.modes < 2:
             raise ValueError("motion-anchored forecast requires multiple modes")
         if self.frame_period_s <= 0.0:
@@ -152,8 +159,8 @@ class MotionAnchoredForecastHead(nn.Module):
         if self.residual_limit_m <= 0.0:
             raise ValueError("motion_residual_limit_m must be positive")
 
-        # Initialization is exactly the history-derived physics model.  Learning can
-        # improve it, but cannot begin by destroying the reliable motion prior.
+        # The anchored model starts from the history-derived physics model.  The
+        # direct ablation uses the same heads but starts from zero displacement.
         for score_head in (self.proposal_mode_score, self.mode_score):
             if self.mode_interaction == "actor_conditioned":
                 nn.init.normal_(score_head.weight, mean=0.0, std=0.02)
@@ -507,17 +514,27 @@ class MotionAnchoredForecastHead(nn.Module):
         )
         context = self._interact(feature, motion_valid)
         mode_feature = self._condition_modes(context)
-        anchors = (
-            velocity[..., None, None, :]
-            * self.anchor_scales.view(1, 1, self.modes, 1, 1)
-            * self.future_times_s.view(1, 1, 1, self.future_frames, 1)
-        )
+        if self.trajectory_parameterization == "anchored":
+            anchors = (
+                velocity[..., None, None, :]
+                * self.anchor_scales.view(1, 1, self.modes, 1, 1)
+                * self.future_times_s.view(1, 1, 1, self.future_frames, 1)
+            )
+        else:
+            anchors = velocity.new_zeros(
+                *velocity.shape[:-1], self.modes, self.future_frames, 2
+            )
         if self.proposal_refinement:
             proposal_logits = self.proposal_mode_score(mode_feature).squeeze(-1)
-            proposal_residual = self.residual_limit_m * torch.tanh(
-                self.proposal_residual_head(mode_feature).view(
-                    *mode_feature.shape[:-1], self.future_frames, 2
-                ) / self.residual_limit_m
+            proposal_raw = self.proposal_residual_head(mode_feature).view(
+                *mode_feature.shape[:-1], self.future_frames, 2
+            )
+            proposal_residual = (
+                proposal_raw
+                if self.trajectory_parameterization == "direct"
+                else self.residual_limit_m * torch.tanh(
+                    proposal_raw / self.residual_limit_m
+                )
             )
             proposal_mean = anchors + proposal_residual
             proposal_log_std = self.proposal_log_std_head(mode_feature).view(
@@ -541,10 +558,18 @@ class MotionAnchoredForecastHead(nn.Module):
             residual_limit = self.residual_limit_m
             base_mean = anchors
         logits = self.mode_score(refined_feature).squeeze(-1)
-        refinement = residual_limit * torch.tanh(
-            self.residual_head(refined_feature).view(
-                *refined_feature.shape[:-1], self.future_frames, 2
-            ) / self.residual_limit_m
+        refinement_raw = self.residual_head(refined_feature).view(
+            *refined_feature.shape[:-1], self.future_frames, 2
+        )
+        refinement = (
+            refinement_raw
+            if (
+                self.trajectory_parameterization == "direct"
+                and not self.proposal_refinement
+            )
+            else residual_limit * torch.tanh(
+                refinement_raw / self.residual_limit_m
+            )
         )
         mean = base_mean + refinement
         log_std = self.log_std_head(refined_feature).view(

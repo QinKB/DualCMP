@@ -180,11 +180,17 @@ sin/cos(source-heading − actor-heading)
 actor query 作为 attention query，所有有效 source/patch tokens 为 key/value。无效 source 在 softmax 前 hard mask。默认：
 
 ```yaml
+aggregation: attention
 geometry_conditioning: true
 source_index_embedding: false
 ```
 
 因此 source slot 置换连同 transform 一起置换时，输出保持不变；模型学的是几何关系，不是“第 0/1 辆车”的固定语义。
+
+论文消融使用两个正交开关。`aggregation=mean`绕过query attention，对有效
+source/patch token做均匀平均；`geometry_conditioning=false`保留query attention，
+但不向token加入actor--CAV geometry。inactive分支在Phase 2显式冻结，checkpoint
+参数schema保持一致。
 
 ## 7. Ordered Variable-History and Interaction
 
@@ -239,11 +245,17 @@ mean residual heads 为零初始化，所以未训练时从物理 anchors 开始
 ```yaml
 forecast:
   architecture: motion_anchored
+  trajectory_parameterization: anchored
   mode_interaction: actor_conditioned
   temporal_history: true
   proposal_refinement: true
   inference_layer: proposal
 ```
+
+`trajectory_parameterization=direct`是motion-anchor消融：同一六模态proposal head
+直接回归receiver-frame displacement，不添加物理anchors，且部署proposal不经过
+12 m anchor-residual `tanh`上限。history、actor interaction、source context、
+uncertainty和mode scoring均保持不变。
 
 `cross_mode` layer 仅作训练期第二层监督；full-test 已证明部署该 refined output 会变差，所以默认推理明确输出 proposal。
 
@@ -358,6 +370,8 @@ ADE5/FDE5 = 2.5870 / 4.3804 m
 - private-null assignment；
 - dense heatmap existence calibration；
 - source hard mask 与 permutation invariance；
+- uniform mean只聚合有效source/patch token且不遍历attention/geometry参数；
+- direct trajectory与anchored模式共享checkpoint参数schema，且不受anchor residual上限；
 - ordered history对不同中间运动敏感；
 - forecast loss到 history/source/proposal参数的有限梯度；
 - two-GPU numerator/count与parameter/buffer同步；

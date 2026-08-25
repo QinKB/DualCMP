@@ -103,6 +103,12 @@ class PointPillarColif(nn.Module):
         self.forecast_bev_representation = str(
             cooperative_args.get("representation", "per_cav")
         )
+        self.source_aggregation = str(
+            cooperative_args.get("aggregation", "attention")
+        )
+        self.source_geometry_conditioning = bool(
+            cooperative_args.get("geometry_conditioning", False)
+        )
         if self.forecast_bev_representation not in FORECAST_BEV_REPRESENTATIONS:
             raise ValueError(
                 "actor_cooperative_fusion.representation must be one of %s"
@@ -119,9 +125,8 @@ class PointPillarColif(nn.Module):
             ),
             patch_size=int(cooperative_args.get("patch_size", 3)),
             dropout=float(cooperative_args.get("dropout", 0.1)),
-            geometry_conditioning=bool(
-                cooperative_args.get("geometry_conditioning", False)
-            ),
+            aggregation=self.source_aggregation,
+            geometry_conditioning=self.source_geometry_conditioning,
             source_index_embedding=bool(
                 cooperative_args.get("source_index_embedding", True)
             ),

@@ -1,4 +1,5 @@
 import torch
+import pytest
 
 
 def _module(**kwargs):
@@ -170,3 +171,65 @@ def test_geometry_ablation_preserves_downstream_rng_and_freezes_inactive_branch(
         parameter.requires_grad
         for parameter in source_index.geometry_projection.parameters()
     )
+
+
+def test_uniform_mean_uses_only_valid_source_patch_tokens() -> None:
+    torch.manual_seed(37)
+    module = _module(
+        aggregation="mean",
+        geometry_conditioning=False,
+        source_index_embedding=False,
+    ).eval()
+    source = torch.randn(1, 2, 8, 8, 8)
+    query = torch.randn(1, 1, 8)
+    boxes = torch.zeros(1, 1, 7)
+    valid = torch.ones(1, 1, dtype=torch.bool)
+    receiver_only = torch.tensor([[True, False]])
+
+    first = module(source, receiver_only, query, boxes, valid)
+    changed = source.clone()
+    changed[:, 1] += 10_000.0
+    second = module(changed, receiver_only, query + 100.0, boxes, valid)
+
+    torch.testing.assert_close(first["context"], second["context"])
+    torch.testing.assert_close(
+        first["attention_weights"][0, 0, 0],
+        torch.full((9,), 1.0 / 9.0),
+    )
+    assert torch.count_nonzero(first["attention_weights"][0, 0, 1]) == 0
+
+
+def test_uniform_mean_receives_source_gradient_and_freezes_attention() -> None:
+    module = _module(
+        aggregation="mean",
+        geometry_conditioning=False,
+        source_index_embedding=False,
+    ).train()
+    module.freeze_inactive_parameters()
+    source = torch.randn(1, 2, 8, 8, 8, requires_grad=True)
+    query = torch.randn(1, 1, 8, requires_grad=True)
+    output = module(
+        source,
+        torch.tensor([[True, True]]),
+        query,
+        torch.zeros(1, 1, 7),
+        torch.ones(1, 1, dtype=torch.bool),
+    )
+    output["context"].square().mean().backward()
+
+    assert torch.count_nonzero(source.grad[:, 0]) > 0
+    assert torch.count_nonzero(source.grad[:, 1]) > 0
+    assert query.grad is None
+    assert module.source_projection.weight.grad is not None
+    assert not any(
+        parameter.requires_grad
+        for parameter in module.source_attention.parameters()
+    )
+    assert not any(
+        parameter.requires_grad for parameter in module.query_norm.parameters()
+    )
+
+
+def test_unknown_source_aggregation_is_rejected() -> None:
+    with pytest.raises(ValueError, match="aggregation"):
+        _module(aggregation="maximum")

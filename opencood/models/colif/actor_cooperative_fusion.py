@@ -25,6 +25,7 @@ class ActorConditionedCooperativeFusion(nn.Module):
         patch_radius_m: float = 2.0,
         patch_size: int = 3,
         dropout: float = 0.1,
+        aggregation: str = "attention",
         geometry_conditioning: bool = False,
         source_index_embedding: bool = True,
     ) -> None:
@@ -34,8 +35,11 @@ class ActorConditionedCooperativeFusion(nn.Module):
         self.max_cav = int(max_cav)
         self.patch_size = int(patch_size)
         self.patch_radius_m = float(patch_radius_m)
+        self.aggregation = str(aggregation)
         self.geometry_conditioning = bool(geometry_conditioning)
         self.source_index_embedding = bool(source_index_embedding)
+        if self.aggregation not in ("attention", "mean"):
+            raise ValueError("aggregation must be attention or mean")
         if self.patch_size < 1 or self.patch_size % 2 == 0:
             raise ValueError("patch_size must be a positive odd integer")
         if self.patch_radius_m < 0.0:
@@ -208,23 +212,40 @@ class ActorConditionedCooperativeFusion(nn.Module):
         key_padding = (~cav_mask.bool())[:, None, :, None].expand(
             batch, queries, agents, patch_tokens
         ).reshape(batch * queries, agents * patch_tokens)
-        query = self.query_norm(actor_query).reshape(
-            batch * queries, 1, self.query_dim
-        )
-        attended, weights = self.source_attention(
-            query,
-            tokens,
-            tokens,
-            key_padding_mask=key_padding,
-            need_weights=True,
-            average_attn_weights=True,
-        )
-        attended = self.output_norm(attended[:, 0]).view(
-            batch, queries, self.query_dim
-        )
-        weights = weights[:, 0].view(
-            batch, queries, agents, patch_tokens
-        )
+        if self.aggregation == "attention":
+            query = self.query_norm(actor_query).reshape(
+                batch * queries, 1, self.query_dim
+            )
+            attended, weights = self.source_attention(
+                query,
+                tokens,
+                tokens,
+                key_padding_mask=key_padding,
+                need_weights=True,
+                average_attn_weights=True,
+            )
+            attended = self.output_norm(attended[:, 0]).view(
+                batch, queries, self.query_dim
+            )
+            weights = weights[:, 0].view(
+                batch, queries, agents, patch_tokens
+            )
+        else:
+            token_valid = (~key_padding).to(tokens.dtype)
+            token_count = token_valid.sum(dim=-1, keepdim=True)
+            attended = (
+                tokens * token_valid[..., None]
+            ).sum(dim=1) / token_count.clamp_min(1.0)
+            attended = self.output_norm(attended).view(
+                batch, queries, self.query_dim
+            )
+            weights = (
+                token_valid / token_count.clamp_min(1.0)
+            ).view(batch, queries, agents, patch_tokens)
+            has_source = token_count.view(batch, queries) > 0
+            attended = torch.where(
+                has_source[..., None], attended, torch.zeros_like(attended)
+            )
         valid = actor_valid_mask.bool()
         attended = torch.where(
             valid[..., None], attended, torch.zeros_like(attended)
@@ -243,4 +264,9 @@ class ActorConditionedCooperativeFusion(nn.Module):
                 parameter.requires_grad = False
         if not self.geometry_conditioning:
             for parameter in self.geometry_projection.parameters():
+                parameter.requires_grad = False
+        if self.aggregation == "mean":
+            for parameter in self.query_norm.parameters():
+                parameter.requires_grad = False
+            for parameter in self.source_attention.parameters():
                 parameter.requires_grad = False
