@@ -3,6 +3,7 @@
 ## Current
 
 - 当前候选结构为`per_cav actor-aligned RoI tokenizer + anchor-aware mode cross-attention + unique anchored GMM head`；一轮同预算表示闸门已通过。
+- 用户已决定进入20轮训练；唯一可执行命令维护在`docs/colif_training.md`第3、5节。
 - 每个目标actor保留逐CAV `5x5` RoI tokens直到mode cross-attention；其他active actors只在各CAV内部做标准RoI max pooling，并以actor-center absolute position形成neighbour object tokens。
 - 检测、measurement、persistent tracking、query identity和history始终只使用CMP fused BEV；forecast读取source BEV但不写回tracker。
 - 当前代码没有point-occupancy support、relative geometry、source ID embedding、availability/router、trajectory refiner或第二套预测输出。
@@ -18,12 +19,13 @@
 - 两组完整评测均覆盖3,986 frames、52,597 matched actor frames、coverage=`0.804925`。5 s partner-only ADE/FDE改善`0.61%/0.84%`，receiver-only改善`0.73%/1.19%`，shared改善`4.61%/2.85%`；差异不来自tracking population变化。
 - per-CAV/fused mean clip loss=`151.4032/154.6647`；两组均epoch complete、global step 428、AMP overflow 0、DDP checksum delta 0。
 - 总体六个MR中唯一主指标例外是2.0 m MR@5s：per-CAV=`0.348043`、fused=`0.346864`，相对轻微恶化`0.34%`；其余五个MR更好。结论必须限定为ADE/FDE六项方向一致。
+- 当前主机为24 logical CPUs、约128 GiB RAM和2张24 GiB RTX 3090。`smoke-bs4w4-percav-s20`验证每卡batch 4、workers 4、accumulation 1：5 batches/5 updates、unused trainable=0、AMP overflow=0、DDP checksum delta=0。相对已验证`batch 2/workers 2/accumulation 2` smoke，在相同启动/保存开销下按处理样本数吞吐提高约43%，且有效global batch仍为8、每epoch仍为428 updates。
 
 ## Open
 
-- 一轮闸门只证明当前结构已产生方向一致的source-preservation增量，不进入论文最终表格，也不能替代多seed或充分收敛结果。
-- 下一步先做真实partner-source masking/intervention，定位partner-only增量较小而shared增量较大的原因；不因一轮闸门直接启动20 epochs。
-- 若干预证明neighbour actor-source路径贡献稳定，再决定最终训练轮数与多seed预算。
+- 依次运行Full、fused BEV和Direct Regression的20轮seed-20训练；若论文独立主张ordered temporal history，再运行`w/o Temporal History`。
+- 当前没有合法的`w/o Neighbour Interaction`开关；需要该表行时必须先实现明确只移除neighbour object tokens的受控开关，不能用no-context或query容量变化替代。
+- 每个20轮run完成后用epoch-19 checkpoint独立执行完整receiver`[0,1]`、`online_masked` test；不得根据test选择epoch。
 
 ## Risks
 
@@ -31,6 +33,7 @@
 - `--disable-actor-cooperative-fusion`是no-context诊断，不是fused-BEV基线。
 - attention图只能说明读取分配，不能证明per-CAV比fused更准；因果证据来自同结构、同初始化、同预算的表示消融。
 - `opencood/logs/smoke-modeobj-percav-s20`是AMP dtype错误的首batch失败目录；`smoke-modeobj-amp-percav-s20`是成功但截断的smoke，两者均不是性能结果。
+- 推荐`batch 4/workers 4/accumulation 1`只在当前双3090主机完成短训验证；尚未记录峰值显存。若长期运行出现OOM，退回已完整验证的`2/2/2`，保持global batch 8。
 
 ## Checkpoints
 

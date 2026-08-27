@@ -78,16 +78,31 @@ encoding的motion queries直接cross-attend目标局部tokens与邻居actor-sour
 最后进入唯一anchored GMM head。模型没有point-occupancy support、relative geometry、
 availability router、trajectory refiner或第二套预测输出。
 
+当前双RTX 3090主机推荐每卡batch 4、每rank 4个DataLoader workers、梯度累积1。
+它与已验证的一轮配置`batch 2 x 2 GPUs x accumulation 2`保持相同有效global
+batch 8和每epoch 428 optimizer updates。真实5-batch双卡smoke中，`4/4/1`
+处理样本的吞吐约比`2/2/2`提高43%，且unused trainable=0、AMP overflow=0、
+DDP parameter/buffer checksum delta=0。若以后出现显存不足或其他任务占用GPU，
+退回`--batch-size 2 --grad-accum-steps 2 --workers 2`，不要改变有效global batch。
+
+启动前检查新run目录：
+
 ```bash
+python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
+  opencood/logs/train-modeobj-s20 --must-not-exist
+```
+
+```bash
+cd /home/qkb/Project/CoLIF
 ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
   --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeattn-percav-s20 \
-  --epochs 20 --batch-size 2 --grad-accum-steps 2 --workers 2 \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/train-modeobj-s20 \
+  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
   --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
   --no-eval --log-every 50
 
@@ -201,11 +216,88 @@ per-CAV六项分别改善`2.80%/2.22%/2.16%`和`1.95%/1.09%/1.74%`。
 ADE/FDE方向一致，而不是所有指标无条件占优。一轮结果不进入论文最终表格。
 
 训练入口会创建或复用输出目录并追加日志，因此检查失败时必须改用新 run ID；
-恢复既有任务只能走第 6 节的显式 `--resume` 路径。
+恢复既有任务只能走第 7 节的显式 `--resume` 路径。
 
 旧 one-epoch no-source/no-history 诊断属于早期 single-receiver 研究阶段，既不进入当前论文表格，也不能替代 fused/per-CAV 表示消融；其日志和 checkpoint 已清理。若未来重新研究 ordered history，必须从当前 Phase-1 checkpoint 按 receiver `[0,1]` 和 20-epoch 协议重新训练。
 
-## 5. 旧flat reader消融记录
+## 5. 当前结构的20轮消融
+
+最小必要集合为Full、fused BEV和Direct Regression。只有论文将ordered temporal
+history列为独立贡献时，才增加`w/o Temporal History`。`--disable-actor-cooperative-fusion`
+会删除全部预测上下文，不是fused基线；当前没有合法的`w/o Neighbour Interaction`
+开关，不能用修改`max_active_queries`等方式伪造该消融。
+
+启动前统一检查：
+
+```bash
+for run in \
+  train-modeobj-fused-s20 \
+  train-modeobj-direct-s20 \
+  train-modeobj-nohist-s20
+do
+  python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
+    "opencood/logs/${run}" --must-not-exist
+done
+```
+
+### 5.1 fused BEV（必须）
+
+```bash
+cd /home/qkb/Project/CoLIF
+ulimit -n 65536
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --init-colif-checkpoint \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/train-modeobj-fused-s20 \
+  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
+  --receiver-ids 0,1 --forecast-bev-representation fused --seed 20 \
+  --no-eval --log-every 50
+```
+
+### 5.2 Direct Regression（motion-anchor消融，必须）
+
+```bash
+cd /home/qkb/Project/CoLIF
+ulimit -n 65536
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --init-colif-checkpoint \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/train-modeobj-direct-s20 \
+  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
+  --receiver-ids 0,1 --forecast-bev-representation per_cav \
+  --forecast-trajectory-parameterization direct --seed 20 \
+  --no-eval --log-every 50
+```
+
+### 5.3 w/o Temporal History（仅在论文主张该组件时运行）
+
+```bash
+cd /home/qkb/Project/CoLIF
+ulimit -n 65536
+PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --init-colif-checkpoint \
+  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir opencood/logs/train-modeobj-nohist-s20 \
+  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
+  --receiver-ids 0,1 --forecast-bev-representation per_cav \
+  --disable-temporal-history --seed 20 \
+  --no-eval --log-every 50
+```
+
+所有变体必须独立训练20轮，并使用各自`checkpoint_epoch_019.pth`执行完整
+`online_masked` test。不能从Full或其他变体checkpoint执行`--resume`，也不能用
+一轮闸门数值填20轮消融表。
+
+## 6. 旧flat reader消融记录
 
 `w/o Relative Geometry`与旧`mean`开关属于已经替换的flat actor-source reader。
 训练入口现在显式拒绝`--source-aggregation`、`--source-geometry`、
@@ -232,7 +324,7 @@ direct数值只能作为当前direct-regression formulation的
 对应证据文件为`opencood/logs/train-query-s20/metrics_test_online_masked_epoch019.json`和
 `opencood/logs/train-direct-s20/metrics_test_online_masked.json`。
 
-## 6. 同阶段断点恢复
+## 7. 同阶段断点恢复
 
 `--resume` 仅用于同一结构、同一阶段、同一配置恢复 model/optimizer/scheduler/scaler/epoch/global step：
 
@@ -248,7 +340,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 
 配置 hash 不一致会拒绝 resume。跨阶段只能使用 `--init-colif-checkpoint`。由旧 wrapper 提取的 `dualcmp_core_receiver01_seed20_20e_20260821` 是仅供推理和评测的 checkpoint，不含可恢复的 optimizer/scheduler/scaler state。
 
-## 7. 双卡 smoke
+## 8. 双卡 smoke
 
 ```bash
 ulimit -n 65536
@@ -266,7 +358,7 @@ CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 
 只有 smoke 可用 `--smoke-force-birth`；任何 smoke/截断 test 数字都不能作为论文性能。
 
-## 8. 独立 strict-online test 与 GT-free inference
+## 9. 独立 strict-online test 与 GT-free inference
 
 评测 checkpoint（checkpoint 内配置优先）：
 

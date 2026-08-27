@@ -2,6 +2,13 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-28 — Phase-2 batch/worker资源闸门
+
+- 当前主机资源为24 logical CPUs、约128 GiB RAM和2张24 GiB RTX 3090；检查时GPU空闲、磁盘可用约450 GB。
+- `smoke-bs4w4-percav-s20`以每卡batch 4、每rank workers 4、accumulation 1完成5-batch真实双卡AMP/DDP训练：unused trainable=0、AMP overflow=0、parameter/buffer checksum delta=0、无OOM。它保持global batch 8、每epoch 428 updates，与一轮闸门的`batch 2/workers 2/accumulation 2`优化预算一致。
+- 旧`2/2/2` smoke处理20个global clips约49.91 s，新`4/4/1`处理40个约69.71 s；包含相同启动与checkpoint开销的样本吞吐提高约43%。因此当前主机20轮命令采用`4/4/1`，`2/2/2`仅作OOM回退。
+- 20轮最小实验集合为Full、fused BEV和Direct Regression；`w/o Temporal History`仅在论文主张该组件时运行。当前没有合法的`w/o Neighbour Interaction`开关，不能用no-context或修改query容量伪造。
+
 ## 2026-08-27 — mode-conditioned actor/source object interaction
 
 - 旧flat actor-source reader、trajectory source refiner和双预测出口已替换为单一forecast head。目标actor的逐CAV `5x5` RoI tokens保留到anchor-aware mode cross-attention；其他active actor在每个CAV内部执行标准RoI max pooling，再加入actor-center absolute position并作为neighbour object tokens。
