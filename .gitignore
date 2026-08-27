@@ -1,5 +1,6 @@
 __pycache__/
 build/*
+DualCMP_TITS/build/
 OpenCOOD.egg-info/*
 MTR/output/*
 MTR/build/*
