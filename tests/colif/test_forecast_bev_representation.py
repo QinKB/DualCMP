@@ -17,32 +17,23 @@ def _encoded():
 
 def test_per_cav_forecast_representation_preserves_source_inputs():
     encoded = _encoded()
-    transforms = torch.randn(2, 2, 4, 4)
-
-    source_bev, cav_mask, selected_transforms = select_forecast_bev_sources(
-        "per_cav", encoded, transforms
+    source_bev, cav_mask = select_forecast_bev_sources(
+        "per_cav", encoded
     )
 
     assert source_bev is encoded["regrouped_source_bev"]
     torch.testing.assert_close(cav_mask, encoded["cav_mask"])
-    assert selected_transforms is transforms
 
 
 def test_fused_forecast_representation_is_one_receiver_frame_source():
     encoded = _encoded()
-    transforms = torch.randn(2, 2, 4, 4)
-
-    source_bev, cav_mask, selected_transforms = select_forecast_bev_sources(
-        "fused", encoded, transforms
+    source_bev, cav_mask = select_forecast_bev_sources(
+        "fused", encoded
     )
 
     assert source_bev.shape == (2, 1, 4, 3, 5)
     torch.testing.assert_close(source_bev[:, 0], encoded["fused_bev"])
     torch.testing.assert_close(cav_mask, torch.ones(2, 1, dtype=torch.bool))
-    torch.testing.assert_close(
-        selected_transforms,
-        torch.eye(4).view(1, 1, 4, 4).expand(2, 1, 4, 4),
-    )
     source_bev.sum().backward()
     torch.testing.assert_close(
         encoded["fused_bev"].grad,
@@ -52,7 +43,7 @@ def test_fused_forecast_representation_is_one_receiver_frame_source():
 
 def test_forecast_representation_rejects_unknown_mode():
     with pytest.raises(ValueError, match="representation"):
-        select_forecast_bev_sources("unknown", _encoded(), None)
+        select_forecast_bev_sources("unknown", _encoded())
 
 
 def test_train_cli_accepts_forecast_ablation_switches(monkeypatch):
@@ -84,7 +75,7 @@ def test_train_cli_accepts_forecast_ablation_switches(monkeypatch):
     assert args.forecast_trajectory_parameterization == "direct"
 
 
-def test_forecast_ablation_cli_overrides_checkpoint_configuration(monkeypatch):
+def test_retired_flat_source_ablation_cli_is_rejected(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
@@ -112,10 +103,34 @@ def test_forecast_ablation_cli_overrides_checkpoint_configuration(monkeypatch):
         }
     }
 
+    with pytest.raises(ValueError, match="retired flat source reader"):
+        train_colif._apply_forecast_ablation_overrides(hypes, args)
+
+
+def test_direct_parameterization_cli_remains_supported(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_colif",
+            "--hypes_yaml",
+            "config.yaml",
+            "--forecast-trajectory-parameterization",
+            "direct",
+        ],
+    )
+    args = train_colif._arguments()
+    hypes = {
+        "model": {
+            "args": {
+                "actor_cooperative_fusion": {},
+                "forecast": {"trajectory_parameterization": "anchored"},
+            }
+        }
+    }
+
     train_colif._apply_forecast_ablation_overrides(hypes, args)
 
-    cooperative = hypes["model"]["args"]["actor_cooperative_fusion"]
-    forecast = hypes["model"]["args"]["forecast"]
-    assert cooperative["aggregation"] == "mean"
-    assert cooperative["geometry_conditioning"] is False
-    assert forecast["trajectory_parameterization"] == "direct"
+    assert (
+        hypes["model"]["args"]["forecast"]["trajectory_parameterization"]
+        == "direct"
+    )

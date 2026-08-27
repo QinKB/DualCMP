@@ -59,7 +59,7 @@ class _Model(torch.nn.Module):
         self.temporal_memory = torch.nn.Linear(2, 2)
         self.memory_scale = torch.nn.Parameter(torch.tensor(0.1))
         self.forecast_head = _Forecast()
-        self.actor_cooperative_fusion = torch.nn.Linear(2, 2)
+        self.actor_source_tokenizer = torch.nn.Linear(2, 2)
         self.actor_cooperative_fusion_enabled = True
         self.future_adapter = torch.nn.Linear(2, 2)
         self.future_adapter.mode = "none"
@@ -103,7 +103,7 @@ def test_two_phase_configuration_uses_spatial_prior_and_disables_latent_feedback
     assert phase2["future_prior_mode"] == "none"
     assert all(p.requires_grad for p in model.forecast_head.parameters())
     assert all(
-        p.requires_grad for p in model.actor_cooperative_fusion.parameters()
+        p.requires_grad for p in model.actor_source_tokenizer.parameters()
     )
     assert not any(p.requires_grad for p in model.future_adapter.parameters())
     assert not any(p.requires_grad for p in model.query_decoder.parameters())
@@ -113,7 +113,7 @@ def test_two_phase_configuration_uses_spatial_prior_and_disables_latent_feedback
     assert not model.temporal_memory.training
     assert not any(p.requires_grad for p in model.temporal_memory.parameters())
     assert model.forecast_head.training
-    assert model.actor_cooperative_fusion.training
+    assert model.actor_source_tokenizer.training
     assert not model.future_adapter.training
 
 
@@ -124,7 +124,7 @@ def test_phase2_does_not_train_disabled_actor_cooperative_fusion():
 
     assert not any(
         parameter.requires_grad
-        for parameter in model.actor_cooperative_fusion.parameters()
+        for parameter in model.actor_source_tokenizer.parameters()
     )
     assert model.forecast_head.actor_cooperative_fusion_enabled is False
 
@@ -152,14 +152,12 @@ def test_phase2_keeps_fresh_forecast_and_future_adapter_initialization(tmp_path)
     configure_trainable_phase(target, 2)
     forecast_before = target.forecast_head.weight.detach().clone()
     adapter_before = target.future_adapter.weight.detach().clone()
-    cooperative_before = (
-        target.actor_cooperative_fusion.weight.detach().clone()
-    )
+    cooperative_before = target.actor_source_tokenizer.weight.detach().clone()
     report = load_colif_weights(target, str(checkpoint))
     torch.testing.assert_close(target.forecast_head.weight, forecast_before)
     torch.testing.assert_close(target.future_adapter.weight, adapter_before)
     torch.testing.assert_close(
-        target.actor_cooperative_fusion.weight, cooperative_before
+        target.actor_source_tokenizer.weight, cooperative_before
     )
     assert torch.all(target.query_decoder.weight == 7.0)
     assert report["retained_current_initialization"]

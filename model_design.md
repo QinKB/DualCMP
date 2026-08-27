@@ -1,10 +1,10 @@
 # CoLIF 最终模型设计与实现合同
 
-> **表示消融合同：** 主模型默认 `actor_cooperative_fusion.representation=per_cav`。`fused` 模式只把预测 reader 的输入替换为 `fused_bev.unsqueeze(1)` 与 receiver-frame identity transform；检测、tracking、query、history、forecast head、loss 和参数量不变。`--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线。
+> **表示消融合同：** 主模型默认 `actor_cooperative_fusion.representation=per_cav`。`fused` 模式只把预测 reader 的输入替换为 `fused_bev.unsqueeze(1)`；检测、tracking、query、history、forecast head、loss 和参数量不变。`--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线。
 
 ## 1. 论文问题与最终主张
 
-CMP 式中间融合把 receiver 对齐的多车 BEV 压缩为一张 fused BEV。该表示适合当前检测与 persistent query 的状态校正，但 downstream forecaster 无法显式区分同一 actor 周围的证据分别来自哪一个视角。检测主要回答 actor 当前在哪里；预测还需围绕目标位置，根据 actor query 与传感器相对几何聚合局部多视角证据。因此最终主张为：
+CMP 式中间融合把 receiver 对齐的多车 BEV 压缩为一张 fused BEV。该表示适合当前检测与 persistent query 的状态校正，但 downstream forecaster 无法显式区分同一 actor 周围的证据分别来自哪一个视角。检测主要回答 actor 当前在哪里；预测还需先形成不同运动假设，再读取仍保留来源维的对象级局部证据。因此最终主张为：
 
 > **面向当前状态估计的统一协同融合，不必然是面向运动预测的充分融合。协同感知与协同预测应共享对齐方式和 LiDAR 主干，但允许采用任务条件不同的证据聚合。**
 
@@ -12,9 +12,9 @@ CoLIF 使用 CMP FuseBEVT 作为唯一检测/跟踪测量路径，同时让 pers
 
 当前已实现并进入验证的方法由三部分组成；其中 per-CAV 相对 fused-BEV 的增量价值仍以正式表示消融为准：
 
-1. **Perception/forecast fusion decoupling**：scene-level FuseBEVT 服务 detection/tracking，actor-conditioned source fusion 服务 forecasting；两者共享一套 PointPillar 特征，不增加第二个检测器。
-2. **Geometry-conditioned persistent actor forecasting**：actor query 根据 actor-to-sensor 相对位置、距离、方位和航向，从各 source BEV 局部 patch 中选择证据，再结合有序可变历史与 actor interaction 预测。
-3. **Motion-anchored multimodal prediction**：agent-specific CAV context 与有序历史、actor interaction 共同形成预测特征；六个速度尺度提供物理 anchors，网络预测有界残差和高斯分布参数。
+1. **Perception/forecast fusion decoupling**：scene-level FuseBEVT 服务 detection/tracking，mode-conditioned source fusion 服务 forecasting；两者共享一套 PointPillar 特征，不增加第二个检测器。
+2. **Actor-aligned source tokenization**：根据 tracked box 的中心、尺寸和朝向，在每张source BEV上执行同一对象坐标系的RoI采样，并将source与空间维保留到预测decoder。
+3. **Anchor-aware multimodal decoding**：有序历史与actor interaction先形成六个带物理anchor语义的motion queries；每个mode读取目标actor的完整多源RoI及其他actor的逐source RoI pooled tokens，再由唯一GMM head输出预测。
 
 Forecast 路径只读 persistent state，不写回 tracking；正式配置固定 `future_prior_mode=none`。
 
@@ -26,24 +26,24 @@ Forecast 路径只读 persistent state，不写回 tracking；正式配置固定
   ▼
 CMP PillarVFE → Scatter → BEV Backbone → Shrink → Compressor
   │
-  ├── receiver-aligned source BEV [B,L,256,48,128]
+  ├── receiver-aligned source BEV [B,L,256,48,176]
   │       │
   │       ├─ 感知/跟踪路径
-  │       │    FuseBEVT → fused BEV [B,256,48,128]
+  │       │    FuseBEVT → fused BEV [B,256,48,176]
   │       │      ├─ CMP cls/reg heads → 当前 dense measurements
   │       │      └─ persistent query decoder
   │       │           → current box / velocity / existence / lifecycle
   │       │
   │       └─ 预测路径
-  │            active actor query/current box
-  │              → 每 source 采样 actor-centered 3×3 patch
-  │              → actor-relative geometry-conditioned attention
-  │              → cooperative actor context [B,Q,256]
+  │            active actor box
+  │              → 每 source 采样 actor-yaw aligned 5×5 RoI
+  │              → target local tokens [B,Q,L,25,256]
+  │              → neighbour actor-source RoI max pooling [B,Q,L,256]
   │
-  └── current query + ordered history + cooperative context + actors
-           → robust motion anchors + temporal/actor interaction
-           → K=6, T=50 Gaussian motion proposal
-           → 默认推理输出 proposal
+  └── current query + ordered history + actor interaction
+           → K=6 anchor-aware motion queries [B,Q,K,256]
+           → target local + neighbour object cross-attention
+           → 唯一 T=50 anchored Gaussian prediction
 ```
 
 ### 2.1 关键张量
@@ -52,14 +52,16 @@ CMP PillarVFE → Scatter → BEV Backbone → Shrink → Compressor
 | --- | --- | --- |
 | flattened voxels | OpenCOOD sparse voxel batch | 所有有效 CAV 扁平输入 |
 | `record_len` | `[B]` | 每个 receiver batch 的有效 CAV 数 |
-| source BEV | `[B,L,256,48,128]` | 对齐到 receiver 网格、尚未 FuseBEVT 的每源特征 |
-| fused BEV | `[B,256,48,128]` | CMP SwapFusionEncoder 输出 |
-| dense `psm/rm` | `[B,2,48,128]` / `[B,14,48,128]` | 当前 anchor classification/regression |
+| source BEV | `[B,L,256,48,176]` | 对齐到 receiver 网格、尚未 FuseBEVT 的每源特征 |
+| fused BEV | `[B,256,48,176]` | CMP SwapFusionEncoder 输出 |
+| dense `psm/rm` | `[B,2,48,176]` / `[B,14,48,176]` | 当前 anchor classification/regression |
 | query state | `[B,128,256]` | 固定容量 persistent slots；不是 128 辆 CAV |
 | current boxes | `[B,128,7]` | receiver frame 中的 `[x,y,z,h,w,l,yaw]` |
 | active mask | `[B,128]` | 当前活跃物理 actors |
 | online history | `[B,128,11,7]` + mask | 最近最多 11 个因果 current states |
-| actor source context | `[B,128,256]` | 每 actor 独立聚合的来源证据 |
+| actor source tokens | `[B,128,L,25,256]` | 保留来源和actor-local空间维的RoI证据 |
+| mode-source attention | `[B,128,6,L,25]` | 每个motion mode对来源/空间证据的分配 |
+| actor-source attention | `[B,128,6,128,L]` | 每个motion mode对其他actor逐source对象token的分配 |
 | forecast | `[B,128,6,50,5]` | `dx,dy,logσx,logσy,ρ` |
 | mode score | `[B,128,6]` | 六模态 logits/probabilities |
 
@@ -87,7 +89,8 @@ source raw point cloud
   → regroup/FuseBEVT
 ```
 
-`source_to_receiver` 同时用于 actor-source geometry，不能用固定 CAV slot 代替传感器空间关系。
+`source_to_receiver`记录数据对齐的真实变换，但当前预测tokenizer不再重复编码
+actor--sensor geometry；source slot也不进入learned embedding。
 
 ### 3.3 运行时与监督隔离
 
@@ -149,49 +152,46 @@ Forecast distribution 不参与以上 association、reference propagation 或 ex
 - `max_active_queries=24`；
 - birth 帧不输出长时 forecast；至少两次因果观测才有速度依据并进入 forecasting。
 
-## 6. Actor-Conditioned Source Fusion
+## 6. Mode-Conditioned Source Fusion
 
 ### 6.1 主表示与受控基线
 
-正式 DualCMP 使用 `per_cav`，即 receiver-aligned source BEV 与对应
-actor--source geometry。协议匹配的 `fused` 基线仍执行同一个
-`ActorConditionedCooperativeFusion`，但只把 fused BEV 作为一个位于 receiver
-原点的 source。该选择发生在 fused BEV 已完成 detection/tracking 之后，因此
+正式 DualCMP 使用 `per_cav` receiver-aligned source BEV。协议匹配的 `fused`
+基线仍执行同一个`ActorAlignedSourceTokenizer`和mode decoder，但只把fused BEV
+作为一个source。该选择发生在 fused BEV 已完成 detection/tracking 之后，因此
 不会改变 measurements、actor queries、identities 或 histories。两种模式的模型
 参数完全相同；它们只检验预测端保留 source 维是否提供增量价值。
 
-对每个 active actor，在每张 receiver-aligned source BEV 上以当前 box center采样 `3×3` patch，覆盖半径 4 m。每个 token包含：
+对每个 active actor，将规则`5×5`网格定义在actor box的局部坐标系中。局部x/y
+分别按box length/width扩大2倍，并使用actor yaw旋转到receiver BEV后，从每张
+source BEV双线性采样。位置输入同时包含按LiDAR范围归一化的actor-local metric
+offset和receiver-frame absolute location。位置编码进入attention key和value，
+使返回的context保留被选择证据的前后/左右及绝对位置。
+
+有序历史、motion descriptor、current box和actor interaction先形成actor state。
+每个mode query再显式编码robust velocity、speed、dispersion、anchor scale、5 s
+anchor endpoint和actor heading。对目标actor，所有`L×25`局部tokens不做空间或
+source压缩；对其他actor，只在每个source内部对RoI content执行标准max pooling，
+再加该actor中心的receiver-frame位置编码。目标细粒度tokens与邻居actor-source
+tokens共同作为key/value。mask只包含inactive actor、CAV padding和越界grid；没有
+point occupancy、support、availability或learned router。source slot没有固定
+embedding，因此source维置换时预测不变。
 
 ```text
-source BEV feature
-+ patch relative offset
-+ actor/source relative geometry
+target memory    = LayerNorm(RoI content) + RoI position
+neighbour memory = LayerNorm(MaxPool(RoI content)) + actor-center position
+mode context     = CrossAttention(mode query, target + neighbour memory)
 ```
-
-几何向量为：
-
-```text
-normalized relative x/y
-distance
-sin/cos(actor-relative bearing)
-sin/cos(source-heading − actor-heading)
-```
-
-actor query 作为 attention query，所有有效 source/patch tokens 为 key/value。无效 source 在 softmax 前 hard mask。默认：
 
 ```yaml
-aggregation: attention
-geometry_conditioning: true
-source_index_embedding: false
+roi_grid_size: 5
+roi_scale: 2.0
+source_attention_heads: 8
+source_attention_ffn: 1024
 ```
 
-因此 source slot 置换连同 transform 一起置换时，输出保持不变；模型学的是几何关系，不是“第 0/1 辆车”的固定语义。
-
-实现提供两个正交诊断开关。`aggregation=mean`绕过query attention，对有效
-source/patch token做均匀平均，但不作为当前论文的必要组件消融；
-`geometry_conditioning=false`保留query attention，只移除actor--CAV geometry，
-用于论文的`w/o Relative Geometry`。inactive分支在Phase 2显式冻结，checkpoint
-参数schema保持一致。
+旧flat attention、uniform mean、relative geometry、availability router、
+trajectory corridor和source residual refiner均不在当前执行路径；对应CLI会显式拒绝。
 
 ## 7. Ordered Variable-History and Interaction
 
@@ -215,9 +215,9 @@ source/patch token做均匀平均，但不作为当前论文的必要组件消�
 
 ### 7.3 Actor interaction
 
-current query、actor-source context、ordered history、motion descriptor 和 normalized current box 相加形成 actor feature。仅 forecast-eligible active actors 进入两层 self-attention，避免 newborn 无速度 actor 污染成熟 actor context。
+current query、ordered history、motion descriptor 和 normalized current box 相加形成 actor feature。仅 forecast-eligible active actors 进入两层 self-attention，避免 newborn 无速度 actor 污染成熟 actor context。source evidence在mode形成后进入，不再被提前压为actor-level共享向量。
 
-## 8. 默认预测出口：Actor-Source Motion Proposal
+## 8. 唯一预测出口：Anchor-Aware Source Decoder
 
 六个速度比例：
 
@@ -231,13 +231,19 @@ current query、actor-source context、ordered history、motion descriptor 和 n
 anchor[k,h] = robust_velocity × scale[k] × (h+1) × 0.1s
 ```
 
-actor-conditioned mode feature输出：
+每个anchor-aware mode query先执行一次pre-norm multi-head cross-attention：
+
+```text
+mode = mode + CrossAttention(mode, source RoI keys/values)
+mode = mode + FFN(LayerNorm(mode))
+```
+
+唯一GMM head输出：
 
 - bounded residual mean；
 - per-step `log_std_x/log_std_y`；
 - bounded correlation `rho`；
 - mode logits；
-- future latent（只用于兼容/诊断，不反馈 tracker）。
 
 mean residual heads 为零初始化，所以未训练时从物理 anchors 开始，不会随机破坏稳定 motion prior。
 
@@ -247,18 +253,18 @@ mean residual heads 为零初始化，所以未训练时从物理 anchors 开始
 forecast:
   architecture: motion_anchored
   trajectory_parameterization: anchored
-  mode_interaction: actor_conditioned
+  mode_interaction: anchor_aware
   temporal_history: true
-  proposal_refinement: true
-  inference_layer: proposal
+  source_attention_heads: 8
+  source_attention_ffn: 1024
 ```
 
-`trajectory_parameterization=direct`是motion-anchor消融：同一六模态proposal head
+`trajectory_parameterization=direct`是motion-anchor设计对照：同一六模态唯一head
 直接回归receiver-frame displacement，不添加物理anchors，且部署proposal不经过
-12 m anchor-residual `tanh`上限。history、actor interaction、source context、
+12 m anchor-residual `tanh`上限。history、actor interaction、source tokens、
 uncertainty和mode scoring均保持不变。
 
-`cross_mode` layer 仅作训练期第二层监督；full-test 已证明部署该 refined output 会变差，所以默认推理明确输出 proposal。
+当前没有cross-mode auxiliary、proposal/refined双出口或训练期隐藏第二层。
 
 ## 9. Loss、匹配与梯度
 
@@ -282,11 +288,11 @@ lifecycle/sequential current identity supervision
 冻结 PointPillar、FuseBEVT、dense heads、measurement generator 和 query tracker，只训练：
 
 ```text
-actor_cooperative_fusion
+actor_source_tokenizer
 ordered history encoder
 actor interaction
-motion proposal
-cross-mode auxiliary decoder
+anchor-aware mode/source decoder
+unique anchored GMM head
 ```
 
 每层预测 loss：
@@ -309,9 +315,13 @@ future mask 按真实有效 future step计算；全 mask actor 不贡献 forecas
 
 ## 11. 固定种子公平结果
 
-固定 seed-20 的 no-source、no-history 与完整主线实验已经验证 actor-source context 和 ordered history 的受控工程路径；精确配置、数值和限制只保存在 `LOG.md` 的对应日期条目中。
+固定 seed-20 的旧no-source/no-history结果只验证被替换flat reader的历史路径。
+当前mode-conditioned reader必须以`docs/colif_training.md`的一轮fused/per-CAV
+结构闸门重新验证，不能继承旧数值作为新网络证据。
 
-完整 receiver `[0,1]`、20 轮 per-CAV checkpoint 已通过 strict-online 评测，但它不能单独证明 per-CAV 表示优于协议匹配的 fused-BEV 表示。该核心增量价值仍以 `HANDOFF.md` 中的正式 fused/per-CAV 闸门为准。
+旧flat reader的receiver `[0,1]`、20轮per-CAV checkpoint已通过strict-online
+评测，但它不能证明当前mode-conditioned reader优于协议匹配的fused-BEV表示。
+当前核心增量价值仍以`HANDOFF.md`中的一轮fused/per-CAV结构闸门为准。
 
 ## 12. CMP 对比边界
 
@@ -353,7 +363,7 @@ ADE5/FDE5 = 2.5870 / 4.3804 m
 - persistent decoder：`opencood/models/colif/persistent_query_decoder.py`
 - state/lifecycle：`state.py`、`lifecycle.py`、`temporal_memory.py`
 - dense measurements：`measurement_proposals.py`
-- actor-source fusion：`actor_cooperative_fusion.py`
+- actor-source tokenizer：`actor_source_tokenizer.py`
 - motion-anchored decoder：`motion_anchored_forecast.py`
 - loss：`opencood/loss/colif_loss.py`、`colif_gmm_loss.py`
 - dataset：`colif_sequence_dataset.py`、`colif_target_builder.py`
@@ -370,11 +380,12 @@ ADE5/FDE5 = 2.5870 / 4.3804 m
 - query birth/keep/miss/death 与 scene reset；
 - private-null assignment；
 - dense heatmap existence calibration；
-- source hard mask 与 permutation invariance；
-- uniform mean只聚合有效source/patch token且不遍历attention/geometry参数；
+- actor-yaw aligned RoI grid、CAV/boundary hard mask与source permutation invariance；
+- target细粒度RoI保留、neighbour content pooling、position同时进入key/value；
+- neighbour actor partner-source intervention及masked-token不变性；
 - direct trajectory与anchored模式共享checkpoint参数schema，且不受anchor residual上限；
 - ordered history对不同中间运动敏感；
-- forecast loss到 history/source/proposal参数的有限梯度；
+- forecast loss到 history/tokenizer/source-attention/unique-head参数的有限梯度；
 - two-GPU numerator/count与parameter/buffer同步；
 - checkpoint config hash、strict resume与独立 strict-online test。
 
@@ -387,18 +398,20 @@ conda run --no-capture-output -n coop python -m pytest -q tests/colif
 ## 16. 结果与证据位置
 
 - 当前 Phase-1 初始化：`opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth`
-- 当前 20 轮 per-CAV 权重：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`
-- 当前 20 轮逐 epoch 评测：`opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/metrics_test.jsonl`
-- 当前 fused seed-20 训练：`opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/`
+- 旧flat reader 20轮per-CAV权重：`opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`
+- 旧flat reader逐epoch评测：`opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/metrics_test.jsonl`
+- 旧flat reader fused seed-20：`opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/`
 - 注意力原始记录与复现元数据：`figures/dualcmp_attention_records.npz`、`figures/dualcmp_attention_summary.json`
 - 训练说明：`docs/colif_training.md`
 - 当前论文草稿：`manuscript.md`
 
-旧 phase、smoke、profile、single-receiver、no-source/no-history 与 source-refiner 运行目录已经清理。它们只描述被拒绝或与当前协议不兼容的历史路线，未来实验不得从这些 checkpoint 恢复。
+旧phase、profile、single-receiver、no-source/no-history与source-refiner运行目录
+已经清理。当前smoke仅验证执行路径，不能作为性能证据；未来实验不得从smoke或
+旧flat reader checkpoint恢复。
 
 ## 17. 投稿前仍需补的证据
 
-当前模型与双卡 20 轮结果已验证，但 T-ITS 投稿前仍应补：
+当前模型只完成单元测试、独立代码审查和双卡短训；T-ITS投稿前仍应补：
 
 1. 多 seed 统计，而不是只报告 seed 20；
 2. 参数量、FLOPs、online latency、显存与通信量；
@@ -406,4 +419,4 @@ conda run --no-capture-output -n coop python -m pytest -q tests/colif
 4. partner-support/receiver-only/shared 分桶的置信区间或多 seed稳定性；
 5. 与相同 target population、相同 strict-online evaluator 下的可比基线。
 
-在这些证据完成前，投稿版本以 agent-specific CAV feature fusion 与 motion-anchored proposal 为模型边界。
+在这些证据完成前，不能把当前候选结构写成已验证优于fused-BEV的最终模型。

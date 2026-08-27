@@ -166,14 +166,12 @@ model:
       enabled: true
       # per_cav is DualCMP; fused is the protocol-matched forecast baseline.
       representation: per_cav
-      aggregation: attention
       input_dim: 256
-      heads: 8
-      patch_radius_m: 4.0
-      patch_size: 3
-      dropout: 0.1
-      geometry_conditioning: true
-      source_index_embedding: false
+      # Proposal-aligned 2-D RoI pooling keeps source and spatial dimensions
+      # explicit until the motion modes perform cross-attention.
+      roi_grid_size: 5
+      roi_scale: 2.0
+      minimum_half_extent_m: 1.0
     state:
     # Keep at most eleven online observations for robust motion anchors.
       memory_len: 11
@@ -219,18 +217,15 @@ model:
       min_context_history_steps: 2
       motion_anchor_scales: [0.0, 0.5, 0.75, 1.0, 1.25, 1.5]
       trajectory_parameterization: anchored
-      mode_interaction: actor_conditioned
       temporal_history: true
-      # Cross-mode decoding is an auxiliary deep-supervision layer; the
-      # motion-anchored proposal remains the deployed prediction.
-      proposal_refinement: true
-      inference_layer: proposal
       history_encoder_layers: 2
       history_encoder_heads: 8
       history_encoder_ffn: 1024
       motion_context_layers: 2
       motion_context_heads: 8
       motion_context_ffn: 1024
+      source_attention_heads: 8
+      source_attention_ffn: 1024
       motion_residual_limit_m: 12.0
       # Query yaw is a direct neural measurement whereas CMP trained MTR on
       # AB3DMOT-filtered headings.  Restore that past-only smoothing at the

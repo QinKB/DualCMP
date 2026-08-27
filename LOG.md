@@ -2,6 +2,14 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-27 — mode-conditioned actor/source object interaction
+
+- 旧flat actor-source reader、trajectory source refiner和双预测出口已替换为单一forecast head。目标actor的逐CAV `5x5` RoI tokens保留到anchor-aware mode cross-attention；其他active actor在每个CAV内部执行标准RoI max pooling，再加入actor-center absolute position并作为neighbour object tokens。
+- 代码审查发现raw point occupancy会把无回波但仍有BEV上下文的区域硬屏蔽，因此该实现及接口已完整删除。当前没有support、availability、router、relative geometry或source ID embedding；mask仅由active actor、CAV padding和BEV boundary组成。
+- 141 tests通过；synthetic intervention确认改变neighbour actor的partner-source token会改变target mode score，而mask该token后变化无效。独立reviewer确认无剩余阻断或高风险问题。
+- 首次真实双卡AMP smoke暴露FP16 attention写入FP32 buffer错误，修复后`smoke-modeobj-amp-percav-s20`完成5 batches/2 optimizer steps：unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0。
+- 下一闸门为同一Phase-1 seed-20 epoch-9初始化下，per-CAV与fused各完整训练1 epoch并执行完整`online_masked` test；旧20-epoch flat结果不能代表新结构。
+
 ## 2026-08-27 — relative geometry与motion anchors消融
 
 - geometry-off从epoch-15恢复并完成epoch-19，最终global step 8,560；独立双卡`online_masked`评测取得ADE@1/3/5s=`0.849644/1.414029/1.948706`、FDE=`1.032063/2.190736/3.249115`。相对Full仅ADE@1s改善0.21%，其余五项退化0.08%--0.71%，不支持显著独立geometry贡献；旧epoch-15 metrics被保留但不进入最终表。

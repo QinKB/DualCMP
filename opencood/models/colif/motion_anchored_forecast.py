@@ -34,14 +34,10 @@ class MotionAnchoredForecastHead(nn.Module):
             "motion_anchor_scales", [0.0, 0.5, 0.75, 1.0, 1.25, 1.5]
         )
         self.modes = len(scales)
-        self.mode_interaction = str(
-            args.get("mode_interaction", "additive")
-        )
+        self.mode_interaction = "anchor_aware"
         self.trajectory_parameterization = str(
             args.get("trajectory_parameterization", "anchored")
         )
-        if self.mode_interaction not in ("additive", "actor_conditioned"):
-            raise ValueError("Unsupported motion-anchor mode interaction")
         if self.trajectory_parameterization not in ("anchored", "direct"):
             raise ValueError(
                 "trajectory_parameterization must be anchored or direct"
@@ -65,8 +61,6 @@ class MotionAnchoredForecastHead(nn.Module):
 
         descriptor_dim = 11
         self.query_norm = nn.LayerNorm(self.query_dim)
-        self.cooperative_norm = nn.LayerNorm(self.query_dim)
-        self.cooperative_scale = nn.Parameter(torch.tensor(0.1))
         self.temporal_history_enabled = bool(
             args.get("temporal_history", True)
         )
@@ -117,35 +111,41 @@ class MotionAnchoredForecastHead(nn.Module):
         self.mode_embedding = nn.Parameter(
             torch.randn(self.modes, self.query_dim) * 0.02
         )
-        self.proposal_refinement = bool(
-            args.get("proposal_refinement", True)
+        self.anchor_query_projection = nn.Sequential(
+            nn.Linear(9, self.query_dim),
+            nn.GELU(),
+            nn.Linear(self.query_dim, self.query_dim),
         )
-        self.inference_layer = str(
-            args.get("inference_layer", "proposal")
+        source_heads = int(
+            args.get("source_attention_heads", args.get("motion_context_heads", 8))
         )
-        if self.inference_layer not in ("proposal", "refined"):
-            raise ValueError("inference_layer must be proposal or refined")
-        self.loss_layers = 2 if self.proposal_refinement else 1
-        self.mode_refiner = nn.TransformerEncoderLayer(
-            d_model=self.query_dim,
-            nhead=int(args.get("motion_context_heads", 8)),
-            dim_feedforward=int(
-                args.get("motion_context_ffn", self.query_dim * 4)
-            ),
-            dropout=float(args.get("dropout", 0.1)),
+        if self.query_dim % source_heads:
+            raise ValueError("source_attention_heads must divide query_dim")
+        dropout = float(args.get("dropout", 0.1))
+        source_ffn = int(args.get("source_attention_ffn", self.query_dim * 4))
+        self.source_query_norm = nn.LayerNorm(self.query_dim)
+        self.source_token_norm = nn.LayerNorm(
+            self.query_dim, elementwise_affine=False
+        )
+        self.source_attention = nn.MultiheadAttention(
+            self.query_dim,
+            source_heads,
+            dropout=dropout,
+            bias=False,
             batch_first=True,
-            norm_first=True,
         )
-        self.proposal_mode_score = nn.Linear(self.query_dim, 1)
-        self.proposal_residual_head = nn.Linear(
-            self.query_dim, self.future_frames * 2
+        self.source_attention_dropout = nn.Dropout(dropout)
+        self.source_ffn_norm = nn.LayerNorm(self.query_dim)
+        self.source_ffn = nn.Sequential(
+            nn.Linear(self.query_dim, source_ffn),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(source_ffn, self.query_dim),
         )
-        self.proposal_log_std_head = nn.Linear(
-            self.query_dim, self.future_frames * 2
-        )
-        self.proposal_rho_head = nn.Linear(
-            self.query_dim, self.future_frames
-        )
+        self.source_ffn_dropout = nn.Dropout(dropout)
+        self.inference_layer = "proposal"
+        self.available_inference_layers = ("proposal",)
+        self.loss_layers = 1
         self.mode_score = nn.Linear(self.query_dim, 1)
         self.residual_head = nn.Linear(
             self.query_dim, self.future_frames * 2
@@ -159,29 +159,16 @@ class MotionAnchoredForecastHead(nn.Module):
         if self.residual_limit_m <= 0.0:
             raise ValueError("motion_residual_limit_m must be positive")
 
-        # The anchored model starts from the history-derived physics model.  The
-        # direct ablation uses the same heads but starts from zero displacement.
-        for score_head in (self.proposal_mode_score, self.mode_score):
-            if self.mode_interaction == "actor_conditioned":
-                nn.init.normal_(score_head.weight, mean=0.0, std=0.02)
-            else:
-                nn.init.zeros_(score_head.weight)
-            nn.init.zeros_(score_head.bias)
-        for residual_head in (
-            self.proposal_residual_head,
-            self.residual_head,
-        ):
-            nn.init.zeros_(residual_head.weight)
-            nn.init.zeros_(residual_head.bias)
-        for std_head in (
-            self.proposal_log_std_head,
-            self.log_std_head,
-        ):
-            nn.init.zeros_(std_head.weight)
-            nn.init.constant_(std_head.bias, math.log(5.0))
-        for rho_head in (self.proposal_rho_head, self.rho_head):
-            nn.init.zeros_(rho_head.weight)
-            nn.init.zeros_(rho_head.bias)
+        # The unique deployed head starts exactly from the history-derived
+        # physics anchors while mode scores remain trainable from step one.
+        nn.init.normal_(self.mode_score.weight, mean=0.0, std=0.02)
+        nn.init.zeros_(self.mode_score.bias)
+        nn.init.zeros_(self.residual_head.weight)
+        nn.init.zeros_(self.residual_head.bias)
+        nn.init.zeros_(self.log_std_head.weight)
+        nn.init.constant_(self.log_std_head.bias, math.log(5.0))
+        nn.init.zeros_(self.rho_head.weight)
+        nn.init.zeros_(self.rho_head.bias)
         self.enabled = bool(args.get("enabled", True))
 
         pair_i, pair_j = torch.triu_indices(
@@ -208,20 +195,16 @@ class MotionAnchoredForecastHead(nn.Module):
                     parameter.requires_grad = False
             self.history_position.requires_grad = False
             self.history_scale.requires_grad = False
-        if not self.proposal_refinement:
+        if not actor_cooperative_fusion_enabled:
             for module in (
-                self.mode_refiner,
-                self.proposal_mode_score,
-                self.proposal_residual_head,
-                self.proposal_log_std_head,
-                self.proposal_rho_head,
+                self.source_query_norm,
+                self.source_token_norm,
+                self.source_attention,
+                self.source_ffn_norm,
+                self.source_ffn,
             ):
                 for parameter in module.parameters():
                     parameter.requires_grad = False
-        if not actor_cooperative_fusion_enabled:
-            for parameter in self.cooperative_norm.parameters():
-                parameter.requires_grad = False
-            self.cooperative_scale.requires_grad = False
 
     def _right_align_history(self, history_box, history_mask):
         length = history_box.shape[-2]
@@ -416,18 +399,211 @@ class MotionAnchoredForecastHead(nn.Module):
                 ).squeeze(0)
         return result
 
-    def _condition_modes(self, context):
-        mode = self.mode_embedding.view(
-            1, 1, self.modes, self.query_dim
+    def _condition_modes(
+        self,
+        context,
+        velocity,
+        dispersion,
+        boxes,
+        anchors,
+    ):
+        batch, queries = context.shape[:2]
+        scales = self.anchor_scales.to(context).view(1, 1, self.modes, 1)
+        scales = scales.expand(batch, queries, self.modes, 1)
+        endpoint = anchors[..., -1, :] / 50.0
+        velocity_feature = (velocity / 20.0)[..., None, :].expand(
+            batch, queries, self.modes, 2
+        )
+        speed_feature = (
+            torch.linalg.vector_norm(velocity, dim=-1, keepdim=True) / 20.0
+        )[..., None, :].expand(batch, queries, self.modes, 1)
+        dispersion_feature = (dispersion / 10.0)[..., None, :].expand(
+            batch, queries, self.modes, 1
+        )
+        yaw = boxes[..., 6, None, None].expand(
+            batch, queries, self.modes, 1
+        )
+        anchor_feature = torch.cat(
+            (
+                velocity_feature,
+                speed_feature,
+                dispersion_feature,
+                endpoint,
+                scales,
+                torch.sin(yaw),
+                torch.cos(yaw),
+            ),
+            dim=-1,
+        )
+        mode = (
+            self.mode_embedding.view(1, 1, self.modes, self.query_dim)
+            + self.anchor_query_projection(anchor_feature)
         )
         actor = context.unsqueeze(2)
-        if self.mode_interaction == "additive":
-            return actor + mode
-        # The additive form makes a shared linear mode head actor-invariant
-        # after softmax: w^T actor is the same offset for every mode.  FiLM-like
-        # multiplication retains the physics-initialized mode tokens while
-        # allowing each actor feature to affect modes differently.
         return actor * (1.0 + torch.tanh(mode)) + mode
+
+    def _decode_source_tokens(
+        self,
+        mode_feature,
+        source_tokens,
+        source_positions,
+        source_actor_positions,
+        source_token_mask,
+        motion_valid,
+    ):
+        batch, queries, modes, dim = mode_feature.shape
+        if source_tokens is None:
+            return (
+                mode_feature,
+                mode_feature.new_zeros(batch, queries, modes, dim),
+                mode_feature.new_zeros(batch, queries, modes, 0, 0),
+                mode_feature.new_zeros(
+                    batch, queries, modes, queries, 0
+                ),
+            )
+        if source_tokens.ndim != 5 or source_tokens.shape[:2] != (
+            batch,
+            queries,
+        ):
+            raise ValueError(
+                "source_tokens must have shape [B,Q,L,P,D]"
+            )
+        if source_tokens.shape[-1] != dim:
+            raise ValueError("source token dimension must match query_dim")
+        if source_positions is None or source_positions.shape != source_tokens.shape:
+            raise ValueError(
+                "source_positions must have shape [B,Q,L,P,D]"
+            )
+        if source_actor_positions is None:
+            # Backward-compatible direct-head use.  Tokenizer positions are
+            # source-independent, so the center cell represents actor center.
+            source_actor_positions = source_positions[
+                :, :, 0, source_positions.shape[3] // 2
+            ]
+        if source_actor_positions.shape != (
+            batch,
+            queries,
+            dim,
+        ):
+            raise ValueError(
+                "source_actor_positions must have shape [B,Q,D]"
+            )
+        if source_token_mask is None or source_token_mask.shape != (
+            source_tokens.shape[:-1]
+        ):
+            raise ValueError("source_token_mask must have shape [B,Q,L,P]")
+
+        sources, patches = source_tokens.shape[2:4]
+        token_valid = source_token_mask.bool()
+        # Position participates in both keys and values.  Otherwise attention
+        # may select a left/right/front/back RoI cell and immediately discard
+        # which cell was selected from the returned context.
+        memory_tokens = self.source_token_norm(source_tokens) + source_positions
+
+        # Standard RoI max pooling produces one object token per actor and
+        # source for interaction reasoning.  The target actor keeps all LxP
+        # local tokens; only neighbour actors are pooled, avoiding quadratic
+        # attention over every patch of every actor.
+        masked_content = torch.where(
+            token_valid[..., None],
+            source_tokens,
+            torch.full_like(source_tokens, torch.finfo(source_tokens.dtype).min),
+        )
+        object_valid = token_valid.any(dim=3)
+        pooled_content = masked_content.amax(dim=3)
+        pooled_content = torch.where(
+            object_valid[..., None],
+            pooled_content,
+            torch.zeros_like(pooled_content),
+        )
+        object_tokens = (
+            self.source_token_norm(pooled_content)
+            + source_actor_positions[:, :, None, :]
+        )
+        object_tokens = torch.where(
+            object_valid[..., None], object_tokens, torch.zeros_like(object_tokens)
+        )
+
+        decoded = mode_feature.clone()
+        context_output = mode_feature.new_zeros(
+            batch, queries, modes, dim
+        )
+        local_attention = mode_feature.new_zeros(
+            batch, queries, modes, sources, patches
+        )
+        actor_attention = mode_feature.new_zeros(
+            batch, queries, modes, queries, sources
+        )
+        source_indices = torch.arange(sources, device=mode_feature.device)
+
+        for batch_index in range(batch):
+            targets = torch.where(motion_valid[batch_index])[0]
+            if not targets.numel():
+                continue
+            target_count = int(targets.numel())
+            local_memory = memory_tokens[batch_index, targets].reshape(
+                target_count, sources * patches, dim
+            )
+            local_valid = token_valid[batch_index, targets].reshape(
+                target_count, sources * patches
+            )
+            neighbour_memory = object_tokens[batch_index].reshape(
+                queries * sources, dim
+            ).unsqueeze(0).expand(target_count, -1, -1)
+            neighbour_valid = object_valid[batch_index].reshape(
+                queries * sources
+            ).unsqueeze(0).expand(target_count, -1).clone()
+            own_object_indices = (
+                targets[:, None] * sources + source_indices[None, :]
+            )
+            neighbour_valid.scatter_(1, own_object_indices, False)
+
+            memory = torch.cat((local_memory, neighbour_memory), dim=1)
+            memory_valid = torch.cat((local_valid, neighbour_valid), dim=1)
+            has_memory = memory_valid.any(dim=-1)
+            safe_valid = memory_valid.clone()
+            safe_valid[~has_memory, 0] = True
+            query = mode_feature[batch_index, targets]
+            source_context, attention = self.source_attention(
+                self.source_query_norm(query),
+                memory,
+                memory,
+                key_padding_mask=~safe_valid,
+                need_weights=True,
+                average_attn_weights=True,
+            )
+            source_context = torch.where(
+                has_memory[:, None, None],
+                source_context,
+                torch.zeros_like(source_context),
+            )
+            attention = torch.where(
+                has_memory[:, None, None],
+                attention,
+                torch.zeros_like(attention),
+            )
+            fused = query + self.source_attention_dropout(source_context)
+            fused = fused + self.source_ffn_dropout(
+                self.source_ffn(self.source_ffn_norm(fused))
+            )
+            fused = torch.where(has_memory[:, None, None], fused, query)
+
+            decoded[batch_index, targets] = fused
+            context_output[batch_index, targets] = source_context.to(
+                context_output.dtype
+            )
+            local_attention[batch_index, targets] = attention[
+                :, :, : sources * patches
+            ].reshape(target_count, modes, sources, patches).to(
+                local_attention.dtype
+            )
+            actor_attention[batch_index, targets] = attention[
+                :, :, sources * patches :
+            ].reshape(target_count, modes, queries, sources).to(
+                actor_attention.dtype
+            )
+
+        return decoded, context_output, local_attention, actor_attention
 
     def empty_outputs(self, query_feat, valid_mask):
         batch, queries, _ = query_feat.shape
@@ -460,6 +636,21 @@ class MotionAnchoredForecastHead(nn.Module):
             ),
             "future_cue": query_feat.new_zeros(batch, queries, self.query_dim),
             "future_uncertainty": query_feat.new_zeros(batch, queries, 1),
+            "cooperative_context": query_feat.new_zeros(
+                batch, queries, self.query_dim
+            ),
+            "cooperative_attention_weights": query_feat.new_zeros(
+                batch, queries, 0, 0
+            ),
+            "mode_source_attention_weights": query_feat.new_zeros(
+                batch, queries, self.modes, 0, 0
+            ),
+            "actor_source_attention_weights": query_feat.new_zeros(
+                batch, queries, queries, 0
+            ),
+            "mode_actor_source_attention_weights": query_feat.new_zeros(
+                batch, queries, self.modes, queries, 0
+            ),
             "forecast_valid_mask": torch.zeros_like(valid_mask),
             "forecast_history_steps": torch.zeros_like(valid_mask, dtype=torch.long),
             "forecast_frame_heading": query_feat.new_zeros(batch, queries),
@@ -482,7 +673,10 @@ class MotionAnchoredForecastHead(nn.Module):
         history_box,
         history_mask,
         receiver_time_s,
-        cooperative_context=None,
+        source_tokens=None,
+        source_positions=None,
+        source_actor_positions=None,
+        source_token_mask=None,
     ):
         del receiver_time_s
         output = self.empty_outputs(query_feat, valid_mask)
@@ -500,20 +694,13 @@ class MotionAnchoredForecastHead(nn.Module):
         temporal_history = self._encode_temporal_history(
             history_box, history_mask
         )
-        if cooperative_context is None:
-            cooperative_context = torch.zeros_like(query_feat)
-        if cooperative_context.shape != query_feat.shape:
-            raise ValueError("cooperative_context must match query_feat")
         feature = (
             self.query_norm(query_feat)
-            + self.cooperative_scale.tanh()
-            * self.cooperative_norm(cooperative_context)
             + self.history_scale.tanh() * temporal_history
             + self.motion_projection(descriptor)
             + self.box_projection(self._normalized_box_features(boxes))
         )
         context = self._interact(feature, motion_valid)
-        mode_feature = self._condition_modes(context)
         if self.trajectory_parameterization == "anchored":
             anchors = (
                 velocity[..., None, None, :]
@@ -524,111 +711,82 @@ class MotionAnchoredForecastHead(nn.Module):
             anchors = velocity.new_zeros(
                 *velocity.shape[:-1], self.modes, self.future_frames, 2
             )
-        if self.proposal_refinement:
-            proposal_logits = self.proposal_mode_score(mode_feature).squeeze(-1)
-            proposal_raw = self.proposal_residual_head(mode_feature).view(
-                *mode_feature.shape[:-1], self.future_frames, 2
-            )
-            proposal_residual = (
-                proposal_raw
-                if self.trajectory_parameterization == "direct"
-                else self.residual_limit_m * torch.tanh(
-                    proposal_raw / self.residual_limit_m
-                )
-            )
-            proposal_mean = anchors + proposal_residual
-            proposal_log_std = self.proposal_log_std_head(mode_feature).view(
-                *mode_feature.shape[:-1], self.future_frames, 2
-            ).clamp(-1.609, 5.0)
-            proposal_rho = 0.5 * torch.tanh(
-                self.proposal_rho_head(mode_feature).view(
-                    *mode_feature.shape[:-1], self.future_frames, 1
-                )
-            )
-            proposal_trajectories = torch.cat(
-                (proposal_mean, proposal_log_std, proposal_rho), dim=-1
-            )
-            refined_feature = self.mode_refiner(
-                mode_feature.reshape(-1, self.modes, self.query_dim)
-            ).view_as(mode_feature)
-            residual_limit = 0.5 * self.residual_limit_m
-            base_mean = proposal_mean
-        else:
-            refined_feature = mode_feature
-            residual_limit = self.residual_limit_m
-            base_mean = anchors
-        logits = self.mode_score(refined_feature).squeeze(-1)
-        refinement_raw = self.residual_head(refined_feature).view(
-            *refined_feature.shape[:-1], self.future_frames, 2
+        mode_feature = self._condition_modes(
+            context, velocity, dispersion, boxes, anchors
         )
-        refinement = (
-            refinement_raw
-            if (
-                self.trajectory_parameterization == "direct"
-                and not self.proposal_refinement
-            )
-            else residual_limit * torch.tanh(
-                refinement_raw / self.residual_limit_m
+        (
+            decoded_feature,
+            source_context,
+            mode_attention,
+            mode_actor_attention,
+        ) = (
+            self._decode_source_tokens(
+                mode_feature,
+                source_tokens,
+                source_positions,
+                source_actor_positions,
+                source_token_mask,
+                motion_valid,
             )
         )
-        mean = base_mean + refinement
-        log_std = self.log_std_head(refined_feature).view(
-            *refined_feature.shape[:-1], self.future_frames, 2
+        logits = self.mode_score(decoded_feature).squeeze(-1)
+        residual_raw = self.residual_head(decoded_feature).view(
+            *decoded_feature.shape[:-1], self.future_frames, 2
+        )
+        residual = (
+            residual_raw
+            if self.trajectory_parameterization == "direct"
+            else self.residual_limit_m * torch.tanh(
+                residual_raw / self.residual_limit_m
+            )
+        )
+        mean = anchors + residual
+        log_std = self.log_std_head(decoded_feature).view(
+            *decoded_feature.shape[:-1], self.future_frames, 2
         ).clamp(-1.609, 5.0)
         rho = 0.5 * torch.tanh(
-            self.rho_head(refined_feature).view(
-                *refined_feature.shape[:-1], self.future_frames, 1
+            self.rho_head(decoded_feature).view(
+                *decoded_feature.shape[:-1], self.future_frames, 1
             )
         )
         trajectories = torch.cat((mean, log_std, rho), dim=-1)
-        use_proposal = (
-            self.proposal_refinement and self.inference_layer == "proposal"
+        probabilities = torch.softmax(logits, dim=-1)
+        cue = torch.einsum(
+            "bqk,bqkd->bqd", probabilities, decoded_feature
         )
-        public_logits = proposal_logits if use_proposal else logits
-        public_trajectories = (
-            proposal_trajectories if use_proposal else trajectories
-        )
-        public_mode_feature = mode_feature if use_proposal else refined_feature
-        probabilities = torch.softmax(public_logits, dim=-1)
-        mode_tokens = self.future_token(public_mode_feature)
-        cue = torch.einsum("bqk,bqkd->bqd", probabilities, mode_tokens)
         entropy = -(
             probabilities * probabilities.clamp_min(1e-8).log()
         ).sum(dim=-1, keepdim=True) / math.log(self.modes)
 
         float_mask = motion_valid[..., None, None, None].to(trajectories.dtype)
         trajectories = trajectories * float_mask
-        public_trajectories = public_trajectories * float_mask
-        probabilities = probabilities * motion_valid[..., None].to(probabilities.dtype)
+        probabilities = probabilities * motion_valid[..., None].to(
+            probabilities.dtype
+        )
         logits = logits.masked_fill(~motion_valid[..., None], -20.0)
         cue = cue * motion_valid[..., None].to(cue.dtype)
         entropy = entropy * motion_valid[..., None].to(entropy.dtype)
-        if self.proposal_refinement:
-            proposal_logits = proposal_logits.masked_fill(
-                ~motion_valid[..., None], -20.0
-            )
-            loss_scores_layers = torch.stack(
-                (proposal_logits, logits), dim=2
-            )
-            loss_trajs_layers = torch.stack(
-                (proposal_trajectories, trajectories), dim=2
-            )
-            loss_intentions_layers = torch.stack(
-                (proposal_mean[..., -1, :], mean[..., -1, :]), dim=2
-            )
-        else:
-            loss_scores_layers = logits.unsqueeze(2)
-            loss_trajs_layers = trajectories.unsqueeze(2)
-            loss_intentions_layers = mean[..., -1, :].unsqueeze(2)
+        loss_scores_layers = logits.unsqueeze(2)
+        loss_trajs_layers = trajectories.unsqueeze(2)
+        loss_intentions_layers = mean[..., -1, :].unsqueeze(2)
         layer_float_mask = motion_valid[..., None, None, None, None].to(
             loss_trajs_layers.dtype
         )
         loss_trajs_layers = loss_trajs_layers * layer_float_mask
+        cooperative_context = torch.einsum(
+            "bqk,bqkd->bqd", probabilities, source_context
+        )
+        cooperative_attention = torch.einsum(
+            "bqk,bqklp->bqlp", probabilities, mode_attention
+        )
+        actor_source_attention = torch.einsum(
+            "bqk,bqknl->bqnl", probabilities, mode_actor_attention
+        )
         output.update(
             {
                 "pred_scores": probabilities,
-                "pred_trajs": public_trajectories,
-                "pred_trajs_local": public_trajectories,
+                "pred_trajs": trajectories,
+                "pred_trajs_local": trajectories,
                 "loss_pred_scores": logits,
                 "loss_pred_trajs_local": trajectories,
                 "loss_pred_scores_layers": loss_scores_layers,
@@ -637,6 +795,11 @@ class MotionAnchoredForecastHead(nn.Module):
                 "loss_intention_points_layers": loss_intentions_layers,
                 "future_cue": cue,
                 "future_uncertainty": entropy,
+                "cooperative_context": cooperative_context,
+                "cooperative_attention_weights": cooperative_attention,
+                "mode_source_attention_weights": mode_attention,
+                "actor_source_attention_weights": actor_source_attention,
+                "mode_actor_source_attention_weights": mode_actor_attention,
                 "forecast_valid_mask": motion_valid,
                 "forecast_history_steps": steps,
                 "forecast_frame_heading": boxes[..., 6],

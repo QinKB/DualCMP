@@ -16,8 +16,8 @@ from opencood.models.colif.persistent_query_mtr import PersistentQueryMTRAdapter
 from opencood.models.colif.dense_measurement import DenseMeasurementProposalGenerator
 from opencood.models.colif.measurement_state_update import MeasurementStateUpdate
 from opencood.models.colif.forecast_motion_prior import ForecastMotionPrior
-from opencood.models.colif.actor_cooperative_fusion import (
-    ActorConditionedCooperativeFusion,
+from opencood.models.colif.actor_source_tokenizer import (
+    ActorAlignedSourceTokenizer,
 )
 
 __all__ = [
@@ -31,5 +31,5 @@ __all__ = [
     "DenseMeasurementProposalGenerator",
     "MeasurementStateUpdate",
     "ForecastMotionPrior",
-    "ActorConditionedCooperativeFusion",
+    "ActorAlignedSourceTokenizer",
 ]

@@ -11,7 +11,7 @@ from scipy.optimize import linear_sum_assignment
 
 from opencood.models.point_pillar_cobevt import PointPillarCoBEVT
 from opencood.models.colif import (
-    ActorConditionedCooperativeFusion,
+    ActorAlignedSourceTokenizer,
     DenseMeasurementProposalGenerator,
     ForecastMotionPrior,
     FutureAdapter,
@@ -35,8 +35,7 @@ FORECAST_BEV_REPRESENTATIONS = ("per_cav", "fused")
 def select_forecast_bev_sources(
     representation: str,
     encoded: dict,
-    source_to_receiver: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Select spatial evidence only for the forecast reader.
 
     Tracking always consumes ``encoded['fused_bev']`` before this selection.
@@ -49,7 +48,6 @@ def select_forecast_bev_sources(
         return (
             encoded["regrouped_source_bev"],
             encoded["cav_mask"].bool(),
-            source_to_receiver,
         )
     if representation == "fused":
         fused_bev = encoded["fused_bev"]
@@ -57,10 +55,7 @@ def select_forecast_bev_sources(
         cav_mask = torch.ones(
             batch, 1, dtype=torch.bool, device=fused_bev.device
         )
-        identity = torch.eye(
-            4, dtype=fused_bev.dtype, device=fused_bev.device
-        ).view(1, 1, 4, 4).expand(batch, 1, 4, 4)
-        return fused_bev.unsqueeze(1), cav_mask, identity
+        return fused_bev.unsqueeze(1), cav_mask
     raise ValueError(
         "actor_cooperative_fusion.representation must be one of %s"
         % (FORECAST_BEV_REPRESENTATIONS,)
@@ -103,32 +98,22 @@ class PointPillarColif(nn.Module):
         self.forecast_bev_representation = str(
             cooperative_args.get("representation", "per_cav")
         )
-        self.source_aggregation = str(
-            cooperative_args.get("aggregation", "attention")
-        )
-        self.source_geometry_conditioning = bool(
-            cooperative_args.get("geometry_conditioning", False)
-        )
+        self.source_aggregation = "mode_attention"
+        self.source_geometry_conditioning = False
         if self.forecast_bev_representation not in FORECAST_BEV_REPRESENTATIONS:
             raise ValueError(
                 "actor_cooperative_fusion.representation must be one of %s"
                 % (FORECAST_BEV_REPRESENTATIONS,)
             )
-        self.actor_cooperative_fusion = ActorConditionedCooperativeFusion(
+        self.actor_source_tokenizer = ActorAlignedSourceTokenizer(
             input_dim=int(cooperative_args.get("input_dim", 256)),
             query_dim=self.query_dim,
-            heads=int(cooperative_args.get("heads", 8)),
             max_cav=int(args["max_cav"]),
             lidar_range=args["lidar_range"],
-            patch_radius_m=float(
-                cooperative_args.get("patch_radius_m", 4.0)
-            ),
-            patch_size=int(cooperative_args.get("patch_size", 3)),
-            dropout=float(cooperative_args.get("dropout", 0.1)),
-            aggregation=self.source_aggregation,
-            geometry_conditioning=self.source_geometry_conditioning,
-            source_index_embedding=bool(
-                cooperative_args.get("source_index_embedding", True)
+            roi_grid_size=int(cooperative_args.get("roi_grid_size", 5)),
+            roi_scale=float(cooperative_args.get("roi_scale", 2.0)),
+            minimum_half_extent_m=float(
+                cooperative_args.get("minimum_half_extent_m", 1.0)
             ),
         )
         self.measurement_proposals = DenseMeasurementProposalGenerator(
@@ -645,11 +630,9 @@ class PointPillarColif(nn.Module):
         (
             forecast_source_bev,
             forecast_cav_mask,
-            forecast_source_to_receiver,
         ) = select_forecast_bev_sources(
             self.forecast_bev_representation,
             encoded,
-            runtime_frame.get("source_to_receiver"),
         )
         auxiliary_psm = self.cobevt.cls_head(fused_bev)
         auxiliary_rm = self.cobevt.reg_head(fused_bev)
@@ -741,23 +724,18 @@ class PointPillarColif(nn.Module):
         )
         if run_forecast and self.forecast_head.enabled:
             if self.actor_cooperative_fusion_enabled:
-                cooperative = self.actor_cooperative_fusion(
+                source_evidence = self.actor_source_tokenizer(
                     forecast_source_bev,
                     forecast_cav_mask,
-                    next_state.query_feat,
                     next_state.ref_box,
                     next_state.active_mask,
-                    source_to_receiver=forecast_source_to_receiver,
                 )
             else:
-                cooperative = {
-                    "context": torch.zeros_like(next_state.query_feat),
-                    "attention_weights": next_state.query_feat.new_zeros(
-                        next_state.query_feat.shape[0],
-                        next_state.query_feat.shape[1],
-                        forecast_cav_mask.shape[1],
-                        self.actor_cooperative_fusion.patch_size ** 2,
-                    ),
+                source_evidence = {
+                    "tokens": None,
+                    "positions": None,
+                    "actor_positions": None,
+                    "token_mask": None,
                 }
             forecast = self.forecast_head(
                 next_state.query_feat,
@@ -766,8 +744,19 @@ class PointPillarColif(nn.Module):
                 next_state.forecast_history_box,
                 next_state.history_mask,
                 next_state.receiver_time_s,
-                cooperative_context=cooperative["context"],
+                source_tokens=source_evidence["tokens"],
+                source_positions=source_evidence["positions"],
+                source_actor_positions=source_evidence[
+                    "actor_positions"
+                ],
+                source_token_mask=source_evidence["token_mask"],
             )
+            cooperative = {
+                "context": forecast["cooperative_context"],
+                "attention_weights": forecast[
+                    "cooperative_attention_weights"
+                ],
+            }
         else:
             cooperative = {
                 "context": torch.zeros_like(next_state.query_feat),
@@ -775,7 +764,7 @@ class PointPillarColif(nn.Module):
                     next_state.query_feat.shape[0],
                     next_state.query_feat.shape[1],
                     forecast_cav_mask.shape[1],
-                    self.actor_cooperative_fusion.patch_size ** 2,
+                    self.actor_source_tokenizer.tokens_per_source,
                 ),
             }
             forecast = self.forecast_head.empty_outputs(
@@ -868,6 +857,9 @@ class PointPillarColif(nn.Module):
             "future_prior_step_index": spatial_prior.step_index,
             "cooperative_attention_weights": cooperative[
                 "attention_weights"
+            ],
+            "actor_source_attention_weights": forecast[
+                "actor_source_attention_weights"
             ],
             "auxiliary_psm": auxiliary_psm,
             "auxiliary_rm": auxiliary_rm,

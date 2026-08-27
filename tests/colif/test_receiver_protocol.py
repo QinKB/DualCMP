@@ -120,3 +120,17 @@ def test_evaluator_only_overrides_forecast_layer_when_explicit() -> None:
     assert report["checkpoint_inference_layer"] == "proposal"
     assert report["effective_inference_layer"] == "refined"
     assert report["diagnostic_forecast_layer_override"] is True
+
+
+def test_single_head_forecaster_rejects_retired_refined_layer() -> None:
+    head = type(
+        "ForecastHead",
+        (),
+        {
+            "inference_layer": "proposal",
+            "available_inference_layers": ("proposal",),
+        },
+    )()
+
+    with pytest.raises(ValueError, match="unavailable"):
+        eval_colif_v2v4real._apply_forecast_layer_override(head, "refined")

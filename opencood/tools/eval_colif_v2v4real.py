@@ -110,6 +110,18 @@ def _apply_forecast_layer_override(forecast_head, requested_layer: str) -> dict:
     )
     overridden = requested_layer != "checkpoint"
     if overridden:
+        available = tuple(
+            getattr(
+                forecast_head,
+                "available_inference_layers",
+                ("proposal", "refined") if has_layer else ("refined",),
+            )
+        )
+        if requested_layer not in available:
+            raise ValueError(
+                "forecast layer %s is unavailable; available=%s"
+                % (requested_layer, available)
+            )
         if not has_layer and requested_layer != "refined":
             raise ValueError("checkpoint forecast head has no proposal layer")
         if has_layer:

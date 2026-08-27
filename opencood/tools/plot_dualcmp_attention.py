@@ -270,10 +270,23 @@ def _capture_example(
     ].detach().float()
     cav_mask = aux["cav_mask"][0].detach().bool()
     mass = source_attention_mass(attention, cav_mask)
-    patch_offsets = (
-        model.actor_cooperative_fusion.unit_patch_offsets.detach().float()
-        * float(model.actor_cooperative_fusion.patch_radius_m)
+    roi_grid = model.actor_source_tokenizer._sampling_grid(
+        track_box.view(1, 1, 7)
+    )[0][0, 0].detach().float()
+    patch_absolute = torch.stack(
+        (
+            (roi_grid[:, 0] + 1.0)
+            * 0.5
+            * (float(lidar_range[3]) - float(lidar_range[0]))
+            + float(lidar_range[0]),
+            (roi_grid[:, 1] + 1.0)
+            * 0.5
+            * (float(lidar_range[4]) - float(lidar_range[1]))
+            + float(lidar_range[1]),
+        ),
+        dim=-1,
     )
+    patch_offsets = patch_absolute - track_xy
     target_current = targets["current_boxes"][0, target_index, :2].float()
     target_future = targets["future_xy"][0, target_index].float()
     target_mask = targets["future_mask"][0, target_index].bool()

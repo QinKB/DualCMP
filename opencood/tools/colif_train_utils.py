@@ -74,22 +74,13 @@ def configure_trainable_phase(model, phase: int) -> dict:
             model.forecast_head,
         ]
         if getattr(model, "actor_cooperative_fusion_enabled", True):
-            trainable_modules.append(model.actor_cooperative_fusion)
+            trainable_modules.append(model.actor_source_tokenizer)
         model.forecast_head.enabled = True
         model.future_adapter.mode = "none"
         model.forecast_motion_prior.mode = future_prior_mode
     for module in trainable_modules:
         for parameter in module.parameters():
             parameter.requires_grad = True
-    if getattr(model, "actor_cooperative_fusion_enabled", True):
-        freeze_actor_fusion = getattr(
-            model.actor_cooperative_fusion,
-            "freeze_inactive_parameters",
-            None,
-        )
-        if freeze_actor_fusion is not None:
-            freeze_actor_fusion()
-
     # The V2V4Real decoder's later cross-attention layers deliberately reuse
     # the first layer's query-position projection, while only the final mode
     # classifier is consumed by our online adapter.  Do not leave these known
@@ -163,9 +154,9 @@ def set_colif_train_mode(model, phase: int) -> None:
             model.temporal_memory.train()
         model.forecast_head.train()
         if getattr(model, "actor_cooperative_fusion_enabled", True):
-            model.actor_cooperative_fusion.train()
+            model.actor_source_tokenizer.train()
         else:
-            model.actor_cooperative_fusion.eval()
+            model.actor_source_tokenizer.eval()
         _set_batch_norm_statistics_frozen(model.forecast_head)
         model.future_adapter.eval()
 
@@ -253,16 +244,18 @@ def load_colif_weights(model, checkpoint_path: str) -> dict:
     state = payload["model_state"] if "model_state" in payload else payload
     source_phase = payload.get("phase") if isinstance(payload, dict) else None
     retained_prefixes = ()
+    ignored_source_prefixes = ()
     if source_phase == 1 and model.forecast_head.enabled:
         retained_prefixes = (
             "forecast_head.",
             "future_adapter.",
-            "actor_cooperative_fusion.",
+            "actor_source_tokenizer.",
         )
+        ignored_source_prefixes = ("actor_cooperative_fusion.",)
     loaded_state = {
         key: value
         for key, value in state.items()
-        if not key.startswith(retained_prefixes)
+        if not key.startswith(retained_prefixes + ignored_source_prefixes)
     }
     result = model.load_state_dict(loaded_state, strict=False)
     retained_initialization = [

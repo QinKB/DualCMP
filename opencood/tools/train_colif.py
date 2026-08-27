@@ -98,12 +98,12 @@ def _arguments():
     parser.add_argument(
         "--source-aggregation",
         choices=("attention", "mean"),
-        help="Forecast source aggregation: actor-query attention or uniform mean",
+        help="Retired legacy flat source aggregation (rejected if supplied)",
     )
     parser.add_argument(
         "--source-geometry",
         choices=("on", "off"),
-        help="Enable or disable relative actor--CAV geometry in source tokens",
+        help="Retired relative-geometry branch (rejected if supplied)",
     )
     parser.add_argument(
         "--forecast-trajectory-parameterization",
@@ -136,12 +136,15 @@ def _seed_data_worker(_worker_id: int) -> None:
 
 
 def _apply_forecast_ablation_overrides(hypes: dict, args) -> None:
-    cooperative = hypes["model"]["args"]["actor_cooperative_fusion"]
     forecast = hypes["model"]["args"]["forecast"]
     if args.source_aggregation is not None:
-        cooperative["aggregation"] = args.source_aggregation
+        raise ValueError(
+            "--source-aggregation belongs to the retired flat source reader"
+        )
     if args.source_geometry is not None:
-        cooperative["geometry_conditioning"] = args.source_geometry == "on"
+        raise ValueError(
+            "--source-geometry belongs to the retired flat source reader"
+        )
     if args.forecast_trajectory_parameterization is not None:
         forecast["trajectory_parameterization"] = (
             args.forecast_trajectory_parameterization
@@ -215,10 +218,12 @@ def main() -> None:
     if args.disable_temporal_history:
         hypes["model"]["args"]["forecast"]["temporal_history"] = False
     if args.disable_proposal_refinement:
-        hypes["model"]["args"]["forecast"]["proposal_refinement"] = False
+        raise ValueError(
+            "--disable-proposal-refinement is retired; the model has one head"
+        )
     if args.forecast_inference_layer is not None:
-        hypes["model"]["args"]["forecast"]["inference_layer"] = (
-            args.forecast_inference_layer
+        raise ValueError(
+            "--forecast-inference-layer is retired; the model has one head"
         )
     if args.observation_score_threshold is not None:
         threshold = float(args.observation_score_threshold)
