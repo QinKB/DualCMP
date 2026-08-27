@@ -187,9 +187,10 @@ source_index_embedding: false
 
 因此 source slot 置换连同 transform 一起置换时，输出保持不变；模型学的是几何关系，不是“第 0/1 辆车”的固定语义。
 
-论文消融使用两个正交开关。`aggregation=mean`绕过query attention，对有效
-source/patch token做均匀平均；`geometry_conditioning=false`保留query attention，
-但不向token加入actor--CAV geometry。inactive分支在Phase 2显式冻结，checkpoint
+实现提供两个正交诊断开关。`aggregation=mean`绕过query attention，对有效
+source/patch token做均匀平均，但不作为当前论文的必要组件消融；
+`geometry_conditioning=false`保留query attention，只移除actor--CAV geometry，
+用于论文的`w/o Relative Geometry`。inactive分支在Phase 2显式冻结，checkpoint
 参数schema保持一致。
 
 ## 7. Ordered Variable-History and Interaction

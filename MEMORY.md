@@ -3,13 +3,14 @@
 ## Current
 
 - Repository: `/home/qkb/Project/CoLIF`.
-- Active question: how source preservation, query weighting, relative geometry, and motion anchors contribute under one fixed online protocol.
+- Active question: how to report the verified source-specific BEV, relative-geometry, and motion-anchor ablations without exceeding their evidence boundary.
 
 ## Knowledge
 
 - Current architecture and tensor contracts are canonical in `model_design.md`; runnable training/evaluation commands are canonical in `docs/colif_training.md`.
 - Main inference uses `actor_cooperative_fusion.representation=per_cav`. The `fused` ablation changes only forecast spatial evidence after fused tracking and has identical model/trainable parameter counts.
 - Controlled source ablations use `aggregation={attention,mean}` and `geometry_conditioning={true,false}`; the motion-anchor ablation uses `trajectory_parameterization={anchored,direct}` with an identical parameter schema.
+- Under an identical strict-online test population, geometry-off at epoch-15 is slightly worse than Full in all six ADE/FDE metrics, while 20-epoch direct regression is substantially worse. Geometry-off is limited by unequal epoch count; direct is additionally confounded by per-rank batch 4 versus Full's batch 2 and by removing the residual bound together with anchors.
 - Recoverable implementation checkpoint: `CP-20260825-01` / `14cc0a9`. Existing per-CAV seed-20 checkpoint: `opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth`.
 
 ## Lessons
@@ -21,4 +22,4 @@
 
 ## Open
 
-- Unverified: uniform mean, query attention without geometry, and direct trajectory 20-epoch results.
+- Unverified: whether geometry-off would retain the same small degradation after 20 epochs, and how direct regression performs under the Full model's matched batch/update budget.

@@ -2,13 +2,16 @@
 
 ## Current
 
-- seed-20 fused-BEV训练和独立`online_masked`评测已完成；per-CAV在整体及partner-only ADE/FDE上均优于fused，表示闸门通过。
-- 当前主模型仍为`per_cav + attention + geometry + anchored`。下一步只顺序完成三个必要消融：uniform mean、query attention without geometry、direct trajectory。
-- 三个可运行开关、20轮命令和恢复边界见`docs/colif_training.md`第5节；正式run ID为`train-mean-s20`、`train-query-s20`、`train-direct-s20`。
+- seed-20 fused-BEV、`w/o Relative Geometry`和`w/o Motion Anchors`均已完成独立`online_masked`评测；当前主模型仍为`per_cav + attention + geometry + anchored`。
+- 论文采用最小组件消融：fused reader移除source-specific BEV，geometry-off移除relative geometry，direct regression移除motion anchors。uniform mean只保留为诊断开关，不进入论文消融。
+- 两项现有checkpoint已有正式结果；但direct使用每卡batch 4，而Full和geometry-off使用每卡batch 2。若论文要把差异严格归因于motion anchors，仍需按匹配训练预算重训direct。
 
 ## Verified
 
 - fused ADE@1/3/5s=`0.854988/1.428909/1.972203`，FDE=`1.044122/2.209837/3.278118`；per-CAV六个ADE/FDE、三档MR及三个support bucket方向均更优，样本计数完全一致。
+- geometry-off使用最后完整epoch-15：ADE@1/3/5s=`0.853783/1.420999/1.956899`，FDE=`1.039269/2.199123/3.255097`；六项均略差于Full，但该结果不是20-epoch严格等训练量对照。
+- direct regression使用完整epoch-19：ADE@1/3/5s=`1.270013/2.307474/3.119810`，FDE=`1.794235/3.912687/5.568135`；相对Full分别增加49.16/63.85/61.23%和74.03/79.14/71.51%。该结果表明当前direct formulation明显较差，但训练batch/updates不匹配，不能把全部差异严格归因于anchors。
+- Full、fused、geometry-off和direct均覆盖3,986 frames、52,597 matched actor frames，coverage=`0.804925`，receiver-only/partner-only/shared counts=`15,847/11,902/24,848`，因此预测指标差异不来自评测对象变化。
 - `--source-aggregation {attention,mean}`、`--source-geometry {on,off}`和`--forecast-trajectory-parameterization {anchored,direct}`已进入训练、checkpoint config、phase log和evaluator metrics。
 - uniform mean只平均有效source/patch token并冻结attention/geometry；direct由相同proposal head直接回归位移，不使用anchors且不受12 m anchor-residual上限。
 - 完整`tests/colif`为141 passed（18个既有warning）；三个变体均完成真实双卡forward/loss/backward/optimizer，unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0。
@@ -18,17 +21,18 @@
 
 ## Open
 
-- 运行`train-mean-s20`并固定epoch-19独立评测。
-- 运行`train-query-s20`并固定epoch-19独立评测。
-- 运行`train-direct-s20`并固定epoch-19独立评测。
-- 将三项结果与现有fused/full结果按相同1/3/5 s ADE/FDE、coverage和support counts核对。
+- 按已验证结果更新`DualCMP_TITS/bare_jrnl_new_sample4.tex`的Ablation Study表格与文字。
+- 若需要投稿级单模块归因，以每卡batch 2、grad accumulation 2重训direct 20轮；否则将现有行明确写为`Direct Regression`设计对照并披露训练预算差异。
+- 用户确认不再需要恢复训练后，再清理query epoch 0--14和direct epoch 0--18中间权重；保留被正式评测的epoch-15/19、训练日志和metrics JSON。
 
 ## Risks
 
 - 训练入口会复用既有输出目录并追加日志；所有新 run 必须先通过 `check_run_id.py --must-not-exist`，既有任务只用显式 `--resume`。
 - `--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线；注意力图也不能替代 fused-vs-per-CAV 因果消融。
-- 当前3.2465 m checkpoint只能恢复推理权重；三个消融均必须从Phase-1 epoch-9初始化，不能从该checkpoint恢复优化器状态。
-- direct变体初始loss和gradient norm高于anchored，但两步smoke在既有1000 gradient clip下无AMP overflow并完成optimizer step；正式结果仍须20轮训练验证。
+- geometry-off仅完成epoch 0--15；其方向一致的小幅差异只能作为relative geometry的有限支持，不能声称20-epoch等训练量因果结论。
+- geometry-off使用每卡batch 2、428 updates/epoch、累计6,848 updates；direct使用每卡batch 4、214 updates/epoch、累计4,280 updates，二者与Full的训练预算并非全部一致。
+- direct变体已完成20轮并在相同测试对象上显著退化；结论只能限定为当前anchored parameterization优于当前direct regression formulation，不能量化anchors单独贡献。
+- 当前query/direct目录仍保留全部中间checkpoint，约29 GiB；清理前必须保留正式评测对应的epoch-15和epoch-19。
 - 已删除的约 233 GiB 二进制 checkpoint 不在 Git 中且不可恢复；历史数值只能用于复盘，不能重新作为初始化资产。
 
 ## Checkpoints

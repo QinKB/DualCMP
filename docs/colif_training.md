@@ -179,38 +179,12 @@ python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
 
 ## 5. 论文消融开关
 
-三个消融都从同一个Phase-1 epoch-9 checkpoint初始化，使用receiver `[0,1]`、
-seed 20、20 epochs、相同batch/梯度累积和`online_masked`评测。训练日志和
-checkpoint配置会记录`source_aggregation`、`source_geometry`和
-`trajectory_parameterization`。
+论文只采用两个必要组件消融：`w/o Relative Geometry`和`w/o Motion Anchors`。
+二者都从同一个Phase-1 epoch-9 checkpoint初始化，使用receiver `[0,1]`、seed 20
+和`online_masked`评测。下面的规范复现实验统一使用每卡batch 2与梯度累积2；
+`aggregation=mean`仅为诊断开关，不进入当前论文消融表。
 
-### 5.1 Per-CAV uniform mean
-
-该变体保留每个CAV的agent-centered patch及相同的feature/patch projection，
-但绕过query attention，对所有有效source/patch token做均匀平均。attention和
-geometry参数被冻结，因此不会形成DDP unused parameters。
-
-```bash
-cd /home/qkb/Project/CoLIF
-ulimit -n 65536
-
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 \
-conda run --no-capture-output -n coop \
-torchrun --standalone --nproc_per_node=2 \
--m opencood.tools.train_colif \
---hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
---phase 2 \
---init-colif-checkpoint \
-opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
---output-dir opencood/logs/train-mean-s20 \
---epochs 20 --batch-size 2 --grad-accum-steps 2 --workers 2 \
---receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
---source-aggregation mean --source-geometry off \
---forecast-trajectory-parameterization anchored \
---no-eval --log-every 50
-```
-
-### 5.2 Query attention without geometry
+### 5.1 w/o Relative Geometry
 
 该变体保留actor-query attention，只关闭relative actor--CAV geometry。
 
@@ -234,7 +208,10 @@ opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
 --no-eval --log-every 50
 ```
 
-### 5.3 Direct trajectory prediction
+现有任务在epoch-16中途停止；正式评测使用最后完整的
+`checkpoint_epoch_015.pth`。用户接受该最后完整epoch，因此不补跑20轮。
+
+### 5.2 w/o Motion Anchors
 
 该变体保留完整per-CAV query-and-geometry aggregation、history、actor interaction
 和相同的六模态预测头，但不添加history-derived physical anchors。部署使用的
@@ -261,8 +238,28 @@ opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
 --no-eval --log-every 50
 ```
 
-三条命令必须顺序运行；两张RTX 3090不足以并行运行两组正式训练。启动每条命令
+两条命令必须顺序运行；两张RTX 3090不足以并行运行两组正式训练。启动每条命令
 前均需对对应output目录执行`check_run_id.py --must-not-exist`。
+
+正式`online_masked`评测结果：
+
+```text
+w/o Relative Geometry (epoch 15)
+ADE@1/3/5s = 0.853783 / 1.420999 / 1.956899
+FDE@1/3/5s = 1.039269 / 2.199123 / 3.255097
+
+w/o Motion Anchors (epoch 19)
+ADE@1/3/5s = 1.270013 / 2.307474 / 3.119810
+FDE@1/3/5s = 1.794235 / 3.912687 / 5.568135
+```
+
+现有geometry-off epoch-15来自每卡batch 2、428 updates/epoch，共6,848 updates；
+现有direct epoch-19实际来自每卡batch 4、214 updates/epoch，共4,280 updates，虽然上方
+规范复现命令使用batch 2。因此direct数值只能作为当前direct-regression formulation的
+结果；严格的motion-anchor单模块归因需要按上方匹配命令重训。
+
+对应证据文件为`opencood/logs/train-query-s20/metrics_test_online_masked.json`和
+`opencood/logs/train-direct-s20/metrics_test_online_masked.json`。
 
 ## 6. 同阶段断点恢复
 

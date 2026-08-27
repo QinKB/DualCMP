@@ -2,6 +2,13 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-27 — relative geometry与motion anchors消融
+
+- `train-query-s20/checkpoint_epoch_015.pth`是geometry-off最后完整epoch；独立双卡`online_masked`评测取得ADE@1/3/5s=`0.853783/1.420999/1.956899`、FDE=`1.039269/2.199123/3.255097`。六项均略差于Full，但训练只完成epoch 0--15，因此只构成有限的方向性证据。
+- `train-direct-s20/checkpoint_epoch_019.pth`完成20轮；同协议ADE=`1.270013/2.307474/3.119810`、FDE=`1.794235/3.912687/5.568135`，相对Full分别增加49.16/63.85/61.23%和74.03/79.14/71.51%。该checkpoint使用每卡batch 4、214 updates/epoch，而Full/geometry-off使用batch 2；同时direct formulation移除了anchors和12 m residual bound，因此不能把全部退化归因于anchors。
+- 两项评测均为exit 0、strict-online、GT-free、world size 2；与Full/fused相同地覆盖3,986 frames、52,597 matched actor frames、80.4925% coverage及15,847/11,902/24,848个receiver-only/partner-only/shared records。正式JSON保存在各自运行目录。
+- 经文献审查，uniform mean不再作为论文必要消融；该开关仅保留用于诊断。
+
 ## 2026-08-25 — fused闸门与必要消融开关
 
 - seed-20 fused epoch-19在相同3,986 frames、52,597 matched forecasts和support counts下取得ADE@1/3/5s=`0.854988/1.428909/1.972203`、FDE=`1.044122/2.209837/3.278118`；per-CAV在六个ADE/FDE、三档MR及receiver-only/partner-only/shared 5 s ADE/FDE上方向均更优。
