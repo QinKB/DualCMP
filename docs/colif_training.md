@@ -89,19 +89,21 @@ DDP parameter/buffer checksum delta=0。若以后出现显存不足或其他任�
 
 ```bash
 python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-  opencood/logs/train-modeobj-s20 --must-not-exist
+  /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-s20 --must-not-exist
 ```
 
 ```bash
-cd /home/qkb/Project/CoLIF
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml \
+  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeobj-s20 \
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-s20 \
   --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
   --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
   --no-eval --log-every 50
@@ -236,22 +238,24 @@ for run in \
   train-modeobj-nohist-s20
 do
   python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-    "opencood/logs/${run}" --must-not-exist
+    "/home/qkb/Project/CoLIF/opencood/logs/${run}" --must-not-exist
 done
 ```
 
 ### 5.1 fused BEV（必须）
 
 ```bash
-cd /home/qkb/Project/CoLIF
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml \
+  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeobj-fused-s20 \
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-fused-s20 \
   --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
   --receiver-ids 0,1 --forecast-bev-representation fused --seed 20 \
   --no-eval --log-every 50
@@ -260,15 +264,17 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 ### 5.2 Direct Regression（motion-anchor消融，必须）
 
 ```bash
-cd /home/qkb/Project/CoLIF
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml \
+  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeobj-direct-s20 \
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-direct-s20 \
   --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
   --receiver-ids 0,1 --forecast-bev-representation per_cav \
   --forecast-trajectory-parameterization direct --seed 20 \
@@ -278,15 +284,17 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
 ### 5.3 w/o Temporal History（仅在论文主张该组件时运行）
 
 ```bash
-cd /home/qkb/Project/CoLIF
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml \
+  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeobj-nohist-s20 \
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-nohist-s20 \
   --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
   --receiver-ids 0,1 --forecast-bev-representation per_cav \
   --disable-temporal-history --seed 20 \

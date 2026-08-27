@@ -34,6 +34,7 @@
 - attention图只能说明读取分配，不能证明per-CAV比fused更准；因果证据来自同结构、同初始化、同预算的表示消融。
 - `opencood/logs/smoke-modeobj-percav-s20`是AMP dtype错误的首batch失败目录；`smoke-modeobj-amp-percav-s20`是成功但截断的smoke，两者均不是性能结果。
 - 推荐`batch 4/workers 4/accumulation 1`只在当前双3090主机完成短训验证；尚未记录峰值显存。若长期运行出现OOM，退回已完整验证的`2/2/2`，保持global batch 8。
+- 训练命令必须使用绝对`PYTHONPATH`和绝对配置/checkpoint/output路径。一次用户启动实际停留在`/home/qkb/Project`，相对`PYTHONPATH=.`导致两个rank在创建run目录前立即退出；`smoke-e30-bs4w4-s20`随后用相同30-epoch/batch/worker配置从正确项目路径完成1-batch验证。
 
 ## Checkpoints
 
