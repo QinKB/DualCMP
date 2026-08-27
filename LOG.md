@@ -9,6 +9,10 @@
 - 141 tests通过；synthetic intervention确认改变neighbour actor的partner-source token会改变target mode score，而mask该token后变化无效。独立reviewer确认无剩余阻断或高风险问题。
 - 首次真实双卡AMP smoke暴露FP16 attention写入FP32 buffer错误，修复后`smoke-modeobj-amp-percav-s20`完成5 batches/2 optimizer steps：unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0。
 - 下一闸门为同一Phase-1 seed-20 epoch-9初始化下，per-CAV与fused各完整训练1 epoch并执行完整`online_masked` test；旧20-epoch flat结果不能代表新结构。
+- 一轮成对闸门已完成。per-CAV相对fused的ADE@1/3/5s为`1.090815/1.724338/2.199316` vs `1.122182/1.763524/2.247769`，改善`2.80%/2.22%/2.16%`；FDE为`1.363446/2.427387/3.382485` vs `1.390626/2.454115/3.442292`，改善`1.95%/1.09%/1.74%`。
+- 两组均为428 updates且评测对象完全一致：3,986 frames、52,597 matched actor frames、coverage=`0.804925`，receiver-only/partner-only/shared counts=`15,847/11,902/24,848`。5 s ADE/FDE相对改善分别为receiver-only `0.73%/1.19%`、partner-only `0.61%/0.84%`、shared `4.61%/2.85%`。
+- 5 s 2.0 m MR中per-CAV轻微差`0.348043` vs `0.346864`，其余1/3 s 2.0 m MR和全部1/3/5 s 3.6 m MR均更好。因此闸门结论是“source-specific representation产生一致ADE/FDE增量”，不是所有指标无条件占优。
+- 原始metrics SHA-256：per-CAV `d3c7fa6a95dea3003e6ee9bc3b5c62def276326130d7f49fe4689b8a8c2e9452`；fused `bd755fbd9e7229dc764b184ef6e420020d07f6b45de72ef84bbfdfdab2229513`。
 
 ## 2026-08-27 — relative geometry与motion anchors消融
 

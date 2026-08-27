@@ -178,8 +178,27 @@ PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
   opencood/logs/train-modeattn-percav-e1-s20/metrics_test_online_masked.json
 ```
 
-一轮结果只作为结构筛选，不进入论文最终表格。只有per-CAV在整体和
-partner-only方向均优于同结构fused，且训练/coverage完全可比，才进入长训。
+一轮结果只作为结构筛选，不进入论文最终表格。只有per-CAV在overall和
+partner-only的ADE/FDE方向均优于同结构fused，且训练/coverage完全可比，
+才考虑后续实验。
+
+### 已验证的一轮闸门（seed 20）
+
+两组均从Phase-1 epoch-9初始化，完成428 updates和完整receiver`[0,1]`
+`online_masked` test：
+
+| Representation | ADE@1s | ADE@3s | ADE@5s | FDE@1s | FDE@3s | FDE@5s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| fused BEV | 1.1222 | 1.7635 | 2.2478 | 1.3906 | 2.4541 | 3.4423 |
+| per-CAV BEV | **1.0908** | **1.7243** | **2.1993** | **1.3634** | **2.4274** | **3.3825** |
+
+per-CAV六项分别改善`2.80%/2.22%/2.16%`和`1.95%/1.09%/1.74%`。
+两组均覆盖3,986 frames、52,597 matched actor frames，forecast coverage均为
+`0.804925`。partner-only 5 s ADE/FDE改善`0.61%/0.84%`，shared改善
+`4.61%/2.85%`。原始证据保存在两个run目录的`train_log.jsonl`和
+`metrics_test_online_masked.json`。总体MR中，per-CAV的2.0 m MR@5s轻微恶化
+`0.34%`，其余2.0 m MR@1/3s和3.6 m MR@1/3/5s更好；因此结论限定为
+ADE/FDE方向一致，而不是所有指标无条件占优。一轮结果不进入论文最终表格。
 
 训练入口会创建或复用输出目录并追加日志，因此检查失败时必须改用新 run ID；
 恢复既有任务只能走第 6 节的显式 `--resume` 路径。

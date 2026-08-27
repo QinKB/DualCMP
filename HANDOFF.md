@@ -2,7 +2,7 @@
 
 ## Current
 
-- 当前候选结构为`per_cav actor-aligned RoI tokenizer + anchor-aware mode cross-attention + unique anchored GMM head`。
+- 当前候选结构为`per_cav actor-aligned RoI tokenizer + anchor-aware mode cross-attention + unique anchored GMM head`；一轮同预算表示闸门已通过。
 - 每个目标actor保留逐CAV `5x5` RoI tokens直到mode cross-attention；其他active actors只在各CAV内部做标准RoI max pooling，并以actor-center absolute position形成neighbour object tokens。
 - 检测、measurement、persistent tracking、query identity和history始终只使用CMP fused BEV；forecast读取source BEV但不写回tracker。
 - 当前代码没有point-occupancy support、relative geometry、source ID embedding、availability/router、trajectory refiner或第二套预测输出。
@@ -14,13 +14,16 @@
 - 双卡AMP smoke `smoke-modeobj-amp-percav-s20`完成5 batches/2 optimizer steps：unused trainable=0、AMP overflow=0、DDP parameter/buffer checksum delta=0；trainable parameters=4,425,212。
 - 第一次CUDA smoke暴露FP16 attention写入FP32 buffer错误；已在写回处显式转换并由第二次真实双卡smoke验证。
 - 历史flat reader结果仅作为失败基线：per-CAV ADE@1/3/5s=`0.851468/1.408316/1.935000`，fused=`0.854988/1.428909/1.972203`。不能代表当前结构。
+- 当前结构从同一个Phase-1 seed-20 epoch-9初始化，各训练1 epoch/428 updates。per-CAV相对fused的ADE@1/3/5s为`1.090815/1.724338/2.199316` vs `1.122182/1.763524/2.247769`，分别改善`2.80%/2.22%/2.16%`；FDE为`1.363446/2.427387/3.382485` vs `1.390626/2.454115/3.442292`，分别改善`1.95%/1.09%/1.74%`。
+- 两组完整评测均覆盖3,986 frames、52,597 matched actor frames、coverage=`0.804925`。5 s partner-only ADE/FDE改善`0.61%/0.84%`，receiver-only改善`0.73%/1.19%`，shared改善`4.61%/2.85%`；差异不来自tracking population变化。
+- per-CAV/fused mean clip loss=`151.4032/154.6647`；两组均epoch complete、global step 428、AMP overflow 0、DDP checksum delta 0。
+- 总体六个MR中唯一主指标例外是2.0 m MR@5s：per-CAV=`0.348043`、fused=`0.346864`，相对轻微恶化`0.34%`；其余五个MR更好。结论必须限定为ADE/FDE六项方向一致。
 
 ## Open
 
-- 从同一个Phase-1 seed-20 epoch-9初始化，分别完整训练当前per-CAV与fused结构1 epoch；输出目录固定为`train-modeattn-percav-e1-s20`和`train-modeattn-fused-e1-s20`。
-- 两个epoch-0 checkpoint均执行完整receiver `[0,1]` strict-online `online_masked` test，比较overall、receiver-only、partner-only和shared，且核对forecast coverage与matched counts。
-- 只有per-CAV在同预算下给出可重复且方向一致的增量，才进入长训；一轮结果不进入论文最终表格。
-- 完成成对评测后，审查模型中仍可能发生的source/spatial压缩；若差异仍接近0，先做真实partner-source intervention定位，而不是直接跑20 epochs。
+- 一轮闸门只证明当前结构已产生方向一致的source-preservation增量，不进入论文最终表格，也不能替代多seed或充分收敛结果。
+- 下一步先做真实partner-source masking/intervention，定位partner-only增量较小而shared增量较大的原因；不因一轮闸门直接启动20 epochs。
+- 若干预证明neighbour actor-source路径贡献稳定，再决定最终训练轮数与多seed预算。
 
 ## Risks
 
@@ -34,4 +37,5 @@
 | ID | Commit | Outcome | Validation | Next |
 | --- | --- | --- | --- | --- |
 | CP-20260827-03 | `b32740d` | 新reader改动前的paper/results/code状态 | tracked-only checkpoint | 当前结构完成后新建checkpoint |
+| CP-20260827-04 | `cfc5a16` | mode-conditioned target/neighbor source object fusion | 141 tests；独立review；双卡AMP smoke | 一轮表示闸门与完整test |
 | CP-20260825-01 | `14cc0a9` | 旧flat reader消融开关 | 141 tests；双卡smoke | 仅供历史复盘 |

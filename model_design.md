@@ -323,6 +323,12 @@ future mask 按真实有效 future step计算；全 mask actor 不贡献 forecas
 评测，但它不能证明当前mode-conditioned reader优于协议匹配的fused-BEV表示。
 当前核心增量价值仍以`HANDOFF.md`中的一轮fused/per-CAV结构闸门为准。
 
+该闸门现已完成：在完全相同的seed-20、Phase-1初始化和428 updates下，per-CAV
+相对fused的ADE@1/3/5s改善`2.80%/2.22%/2.16%`，FDE改善
+`1.95%/1.09%/1.74%`。评测对象、tracking结果和coverage完全相同。shared actors的
+5 s ADE/FDE改善`4.61%/2.85%`，partner-only改善`0.61%/0.84%`。这证明当前
+source-preserving reader已产生可测增量，但一轮单seed结果不作为论文最终性能。
+
 ## 12. CMP 对比边界
 
 本地复现 CMP no-aggregation epoch-5：
