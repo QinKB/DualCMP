@@ -4,7 +4,7 @@
 
 ## 2026-08-27 — relative geometry与motion anchors消融
 
-- `train-query-s20/checkpoint_epoch_015.pth`是geometry-off最后完整epoch；独立双卡`online_masked`评测取得ADE@1/3/5s=`0.853783/1.420999/1.956899`、FDE=`1.039269/2.199123/3.255097`。六项均略差于Full，但训练只完成epoch 0--15，因此只构成有限的方向性证据。
+- geometry-off从epoch-15恢复并完成epoch-19，最终global step 8,560；独立双卡`online_masked`评测取得ADE@1/3/5s=`0.849644/1.414029/1.948706`、FDE=`1.032063/2.190736/3.249115`。相对Full仅ADE@1s改善0.21%，其余五项退化0.08%--0.71%，不支持显著独立geometry贡献；旧epoch-15 metrics被保留但不进入最终表。
 - `train-direct-s20/checkpoint_epoch_019.pth`完成20轮；同协议ADE=`1.270013/2.307474/3.119810`、FDE=`1.794235/3.912687/5.568135`，相对Full分别增加49.16/63.85/61.23%和74.03/79.14/71.51%。该checkpoint使用每卡batch 4、214 updates/epoch，而Full/geometry-off使用batch 2；同时direct formulation移除了anchors和12 m residual bound，因此不能把全部退化归因于anchors。
 - 两项评测均为exit 0、strict-online、GT-free、world size 2；与Full/fused相同地覆盖3,986 frames、52,597 matched actor frames、80.4925% coverage及15,847/11,902/24,848个receiver-only/partner-only/shared records。正式JSON保存在各自运行目录。
 - 经文献审查，uniform mean不再作为论文必要消融；该开关仅保留用于诊断。

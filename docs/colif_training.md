@@ -208,8 +208,8 @@ opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
 --no-eval --log-every 50
 ```
 
-现有任务在epoch-16中途停止；正式评测使用最后完整的
-`checkpoint_epoch_015.pth`。用户接受该最后完整epoch，因此不补跑20轮。
+现有任务曾在epoch-16中途停止，随后从`checkpoint_epoch_015.pth`恢复并完成
+epoch 16--19。最终正式评测使用`checkpoint_epoch_019.pth`。
 
 ### 5.2 w/o Motion Anchors
 
@@ -244,21 +244,21 @@ opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
 正式`online_masked`评测结果：
 
 ```text
-w/o Relative Geometry (epoch 15)
-ADE@1/3/5s = 0.853783 / 1.420999 / 1.956899
-FDE@1/3/5s = 1.039269 / 2.199123 / 3.255097
+w/o Relative Geometry (epoch 19)
+ADE@1/3/5s = 0.849644 / 1.414029 / 1.948706
+FDE@1/3/5s = 1.032063 / 2.190736 / 3.249115
 
 w/o Motion Anchors (epoch 19)
 ADE@1/3/5s = 1.270013 / 2.307474 / 3.119810
 FDE@1/3/5s = 1.794235 / 3.912687 / 5.568135
 ```
 
-现有geometry-off epoch-15来自每卡batch 2、428 updates/epoch，共6,848 updates；
+现有geometry-off epoch-19来自每卡batch 2、428 updates/epoch，共8,560 updates；
 现有direct epoch-19实际来自每卡batch 4、214 updates/epoch，共4,280 updates，虽然上方
 规范复现命令使用batch 2。因此direct数值只能作为当前direct-regression formulation的
 结果；严格的motion-anchor单模块归因需要按上方匹配命令重训。
 
-对应证据文件为`opencood/logs/train-query-s20/metrics_test_online_masked.json`和
+对应证据文件为`opencood/logs/train-query-s20/metrics_test_online_masked_epoch019.json`和
 `opencood/logs/train-direct-s20/metrics_test_online_masked.json`。
 
 ## 6. 同阶段断点恢复

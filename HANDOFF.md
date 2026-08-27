@@ -2,14 +2,14 @@
 
 ## Current
 
-- seed-20 fused-BEV、`w/o Relative Geometry`和`w/o Motion Anchors`均已完成独立`online_masked`评测；当前主模型仍为`per_cav + attention + geometry + anchored`。
+- seed-20 fused-BEV、20-epoch`w/o Relative Geometry`和`Direct Regression`均已完成独立`online_masked`评测；当前主模型仍为`per_cav + attention + geometry + anchored`。
 - 论文采用最小组件消融：fused reader移除source-specific BEV，geometry-off移除relative geometry，direct regression移除motion anchors。uniform mean只保留为诊断开关，不进入论文消融。
-- 两项现有checkpoint已有正式结果；但direct使用每卡batch 4，而Full和geometry-off使用每卡batch 2。若论文要把差异严格归因于motion anchors，仍需按匹配训练预算重训direct。
+- Full、fused和geometry-off均为20 epochs、每卡batch 2、最终global step 8,560。direct使用每卡batch 4、global step 4,280；若论文要把差异严格归因于motion anchors，仍需按匹配训练预算重训direct。
 
 ## Verified
 
 - fused ADE@1/3/5s=`0.854988/1.428909/1.972203`，FDE=`1.044122/2.209837/3.278118`；per-CAV六个ADE/FDE、三档MR及三个support bucket方向均更优，样本计数完全一致。
-- geometry-off使用最后完整epoch-15：ADE@1/3/5s=`0.853783/1.420999/1.956899`，FDE=`1.039269/2.199123/3.255097`；六项均略差于Full，但该结果不是20-epoch严格等训练量对照。
+- geometry-off恢复到epoch-19后：ADE@1/3/5s=`0.849644/1.414029/1.948706`，FDE=`1.032063/2.190736/3.249115`。相对Full仅ADE@1s更好0.21%，其余五项差0.08%--0.71%，不支持把relative geometry写成显著独立贡献。
 - direct regression使用完整epoch-19：ADE@1/3/5s=`1.270013/2.307474/3.119810`，FDE=`1.794235/3.912687/5.568135`；相对Full分别增加49.16/63.85/61.23%和74.03/79.14/71.51%。该结果表明当前direct formulation明显较差，但训练batch/updates不匹配，不能把全部差异严格归因于anchors。
 - Full、fused、geometry-off和direct均覆盖3,986 frames、52,597 matched actor frames，coverage=`0.804925`，receiver-only/partner-only/shared counts=`15,847/11,902/24,848`，因此预测指标差异不来自评测对象变化。
 - `--source-aggregation {attention,mean}`、`--source-geometry {on,off}`和`--forecast-trajectory-parameterization {anchored,direct}`已进入训练、checkpoint config、phase log和evaluator metrics。
@@ -30,9 +30,10 @@
 - 训练入口会复用既有输出目录并追加日志；所有新 run 必须先通过 `check_run_id.py --must-not-exist`，既有任务只用显式 `--resume`。
 - `--disable-actor-cooperative-fusion` 是 no-context 诊断，不是 fused-BEV 基线；注意力图也不能替代 fused-vs-per-CAV 因果消融。
 - geometry-off仅完成epoch 0--15；其方向一致的小幅差异只能作为relative geometry的有限支持，不能声称20-epoch等训练量因果结论。
-- geometry-off使用每卡batch 2、428 updates/epoch、累计6,848 updates；direct使用每卡batch 4、214 updates/epoch、累计4,280 updates，二者与Full的训练预算并非全部一致。
+- geometry-off和Full均使用每卡batch 2、428 updates/epoch、累计8,560 updates；direct使用每卡batch 4、214 updates/epoch、累计4,280 updates。
 - direct变体已完成20轮并在相同测试对象上显著退化；结论只能限定为当前anchored parameterization优于当前direct regression formulation，不能量化anchors单独贡献。
-- 当前query/direct目录仍保留全部中间checkpoint，约29 GiB；清理前必须保留正式评测对应的epoch-15和epoch-19。
+- 当前query/direct目录仍保留全部中间checkpoint；清理前必须保留正式评测对应的query/direct epoch-19、训练日志和metrics JSON。query epoch-15 metrics只作为被替代证据保留。
+- checkpoint config仍保留YAML中的`grad_accum_steps=1`，而训练日志记录实际CLI值2；训练预算审计必须以`train_log.jsonl`为准。
 - 已删除的约 233 GiB 二进制 checkpoint 不在 Git 中且不可恢复；历史数值只能用于复盘，不能重新作为初始化资产。
 
 ## Checkpoints
