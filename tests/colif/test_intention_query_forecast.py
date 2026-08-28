@@ -115,6 +115,20 @@ def test_fixed_64_intentions_train_and_nms_six_modes():
     )
 
 
+def test_only_executed_object_query_position_projection_is_trainable():
+    head = _head(decoder_layers=3)
+
+    assert all(
+        parameter.requires_grad
+        for parameter in head.decoder.obj_decoder_layers[0].ca_qpos_proj.parameters()
+    )
+    for layer in head.decoder.obj_decoder_layers[1:]:
+        assert not any(
+            parameter.requires_grad
+            for parameter in layer.ca_qpos_proj.parameters()
+        )
+
+
 def test_each_decoder_layer_updates_dynamic_query_center():
     torch.manual_seed(5)
     head = _head(decoder_layers=2).eval()

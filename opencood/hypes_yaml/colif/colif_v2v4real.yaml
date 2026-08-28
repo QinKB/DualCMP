@@ -194,8 +194,8 @@ model:
       d_model: 512
       decoder_layers: 6
       attention_heads: 8
-      # Retain the published decoder shape so --init-mtr-checkpoint loads
-      # strictly; the map branch remains frozen in V2V4Real's map-free path.
+      # Retain the published decoder shape; the map branch remains frozen in
+      # V2V4Real's map-free path. All active forecast weights train from scratch.
       map_d_model: 256
       dropout: 0.1
       intention_random_init: false
@@ -263,9 +263,9 @@ loss:
 
 optimizer:
   core_method: AdamW
-  # Phase 2 jointly learns the randomly initialized forecast head and
-  # actor-source fusion.  Keep their peak learning rates identical.
-  lr: 0.0001
+  # Phase 2 trains the complete forecast branch from scratch.  The MTR decoder
+  # structure is reused, but no MTR checkpoint is loaded.
+  lr: 0.0005
   trunk_lr_scale: 0.1
   forecast_lr_scale: 1.0
   args:

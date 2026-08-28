@@ -5,11 +5,8 @@
 ## 1. Fixed assets
 
 ```text
-Phase-1 tracker:
+Phase-1 detector/tracker:
 opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth
-
-CMP/MTR decoder:
-MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth
 
 64 endpoint intentions:
 preprocessed_data/v2v4real/v2v4real_cluster_64_center_dict.pkl
@@ -53,12 +50,12 @@ PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
   --init-cobevt-checkpoint \
   /home/qkb/Project/CoLIF/pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
   --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-p1-s20 \
-  --epochs 20 --receiver-ids 0,1 --seed 20 --log-every 50
+  --epochs 20 --lr 0.0005 --receiver-ids 0,1 --seed 20 --log-every 50
 ```
 
 ## 4. Phase 2 formal DualCMP
 
-MTR V2V4Real原配置每GPU batch为1。当前新decoder在完成GPU smoke前也使用保守的每卡batch 1、梯度累积4；双卡effective global batch为8。
+完整forecast branch从随机初始化开始训练；仅复用MTR decoder结构和64个endpoint intentions，不加载MTR checkpoint。每GPU batch为1、梯度累积4，双卡effective global batch为8。AdamW峰值学习率固定为`5e-4`，前两轮从`2e-5` warm up，随后cosine decay至`2e-6`。
 
 ```bash
 cd /home/qkb/Project/CoLIF || exit 1
@@ -70,15 +67,13 @@ PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
   --phase 2 \
   --init-colif-checkpoint \
   /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --init-mtr-checkpoint \
-  /home/qkb/Project/CoLIF/MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth \
   --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-dual-s20 \
-  --epochs 20 --batch-size 1 --grad-accum-steps 4 --workers 2 \
+  --epochs 20 --batch-size 1 --grad-accum-steps 4 --workers 2 --lr 0.0005 \
   --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
   --no-eval --log-every 50
 ```
 
-不得省略`--init-mtr-checkpoint`：Phase-1 checkpoint故意不导入其未训练的forecast参数。
+Phase-1 checkpoint只恢复检测与跟踪；forecast branch保留当前seed对应的随机初始化。训练入口不提供MTR checkpoint加载参数，避免误用预训练预测权重。
 
 ## 5. Required representation ablations
 
@@ -90,7 +85,7 @@ PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
 | `train-fused-s20` | `fused` | fused consensus only |
 | `train-source-s20` | `source` | per-CAV source evidence only |
 
-三者使用同一Phase-1 checkpoint、MTR checkpoint、seed、epoch、batch、optimizer、receiver和test population。运行`fused`或`source`时，只替换主命令中的两项：
+三者使用同一Phase-1 checkpoint、随机初始化seed、epoch、batch、optimizer、receiver和test population。运行`fused`或`source`时，只替换主命令中的两项：
 
 ```text
 --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-fused-s20
@@ -116,11 +111,9 @@ PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
   --phase 2 \
   --init-colif-checkpoint \
   /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --init-mtr-checkpoint \
-  /home/qkb/Project/CoLIF/MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth \
   --output-dir /home/qkb/Project/CoLIF/opencood/logs/smoke-dual-s20 \
   --epochs 1 --smoke-batches 1 \
-  --batch-size 1 --grad-accum-steps 1 --workers 1 \
+  --batch-size 1 --grad-accum-steps 1 --workers 1 --lr 0.0005 \
   --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
   --no-eval --log-every 1
 ```
@@ -129,13 +122,24 @@ Smoke目录不能作为性能结果或正式resume起点。
 
 ## 7. Resume
 
-只允许完全相同结构和config hash：
+只允许完全相同结构和config hash。下面以正式`dual`运行从epoch 9继续为例；必须保留原run ID和所有影响训练语义的参数：
 
 ```bash
---resume /home/qkb/Project/CoLIF/opencood/logs/<run-id>/checkpoint_epoch_NNN.pth
+cd /home/qkb/Project/CoLIF || exit 1
+ulimit -n 65536
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 2 \
+  --resume /home/qkb/Project/CoLIF/opencood/logs/train-dual-s20/checkpoint_epoch_009.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-dual-s20 \
+  --epochs 20 --batch-size 1 --grad-accum-steps 4 --workers 2 --lr 0.0005 \
+  --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
+  --no-eval --log-every 50
 ```
 
-`--resume`不能与任何`--init-*-checkpoint`同时使用。旧motion-anchor/flat-reader checkpoint禁止resume到当前模型。
+`--resume`不能与任何`--init-*-checkpoint`同时使用。`phase`、epochs、batch、gradient accumulation、学习率、receiver、representation和seed必须与原run一致；否则config hash拒绝恢复。旧motion-anchor/flat-reader checkpoint禁止resume到当前模型。
 
 ## 8. Strict-online test
 

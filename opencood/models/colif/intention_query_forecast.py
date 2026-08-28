@@ -188,11 +188,18 @@ class IntentionQueryForecastHead(nn.Module):
             unused.extend(
                 [self.decoder.map_query_content_mlps, self.decoder.map_query_embed_mlps]
             )
+        # MTR passes ``is_first=True`` only to decoder layer 0. With the
+        # published ``keep_query_pos=False`` setting, later ca_qpos_proj
+        # modules are structurally bypassed by TransformerDecoderLayer.
+        unused.extend(
+            layer.ca_qpos_proj
+            for layer in self.decoder.obj_decoder_layers[1:]
+        )
         self._unused_map_modules = unused
         self.freeze_unused_map_parameters()
 
     def freeze_unused_map_parameters(self) -> None:
-        """Freeze MTR map branches that V2V4Real's map-free path never reads."""
+        """Freeze inherited MTR modules that this map-free path never reads."""
 
         for module in self._unused_map_modules:
             for parameter in module.parameters():
@@ -220,32 +227,6 @@ class IntentionQueryForecastHead(nn.Module):
             ):
                 for parameter in module.parameters():
                     parameter.requires_grad = False
-
-    def load_cmp_checkpoint(self, checkpoint_path: str) -> dict:
-        """Strictly load only the published MTR motion decoder parameters."""
-
-        payload = torch.load(checkpoint_path, map_location="cpu")
-        source = payload.get("model_state", payload)
-        prefix = "motion_transformer.motion_decoder."
-        decoder_state = {
-            key[len(prefix) :]: value
-            for key, value in source.items()
-            if key.startswith(prefix)
-        }
-        if not decoder_state:
-            raise ValueError(f"checkpoint has no {prefix} parameters")
-        result = self.decoder.load_state_dict(decoder_state, strict=True)
-        self.freeze_unused_map_parameters()
-        return {
-            "loaded_count": len(decoder_state),
-            "decoder_loaded_count": len(decoder_state),
-            "newly_initialized": (
-                "online_history_encoder, shared_dual_attention, "
-                "attention_memory_projection, latent_projection"
-            ),
-            "missing": list(result.missing_keys),
-            "unexpected": list(result.unexpected_keys),
-        }
 
     def _right_align_history(self, history_box, history_mask):
         if history_box.shape[:-1] != history_mask.shape or history_box.shape[-1] != 7:

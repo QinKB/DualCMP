@@ -141,7 +141,7 @@ DualCMP只持有一套`PointPillarCoBEVT`。fused BEV同时产生dense cls/reg m
 
 - per-CAV point clouds在voxelization前已投影到当前receiver frame；FuseBEVT内不重复warp。
 - tracking state使用receiver-frame radians。
-- 本地CMP/MTR的V2V4Real intentions/checkpoint由degree-valued heading作为trigonometric angle生成；该legacy兼容只存在于MTR local-coordinate边界，public output使用同一角度逆变换。
+- 本地CMP/MTR的V2V4Real intentions由degree-valued heading作为trigonometric angle生成；该legacy兼容只存在于MTR local-coordinate边界，public output使用同一角度逆变换。
 - runtime forward只允许point clouds、poses/transforms、CAV mask、receiver time与session metadata。
 - `ass_id`、GT boxes、canonical identity和future GT只进入criterion/evaluator，不能进入model forward或recurrent state。
 
@@ -162,7 +162,7 @@ MTR dense future prediction保留为标准object-context auxiliary objective。�
 ## 6. Training and checkpoint contract
 
 1. **Phase 1**：从CoBEVT checkpoint训练fused detection/persistent tracking，forecast disabled。
-2. **Phase 2**：从固定Phase-1 checkpoint恢复tracker，同时通过`--init-mtr-checkpoint`严格加载`motion_transformer.motion_decoder.*`；冻结perception/tracking，只训练history encoder、shared tokenizer、MTR decoder与dual attention。
+2. **Phase 2**：从固定Phase-1 checkpoint恢复并冻结perception/tracking；history encoder、shared tokenizer、MTR decoder与dual attention全部从当前seed对应的随机初始化开始训练。模型复用MTR decoder结构和64个endpoint intentions，不加载MTR预测权重。
 
 旧motion-anchor、flat reader、source-refiner及旧`PersistentQueryMTRAdapter` checkpoint与当前结构不兼容，禁止静默加载或resume。`--resume`只允许完全相同config hash的当前结构checkpoint。
 
@@ -179,7 +179,7 @@ MTR dense future prediction保留为标准object-context auxiliary objective。�
 - source permutation prediction invariant；
 - loss梯度到达history、tokenizer、shared dual attention和所有MTR motion heads；
 - dual/fused/source参数schema相同；
-- Phase-1 + MTR双checkpoint初始化严格且无unexpected keys；
+- Phase-1 checkpoint严格恢复检测与跟踪，forecast branch不导入任何预测checkpoint；
 - 单卡真实batch forward/loss/backward/optimizer及双卡DDP同步smoke；
 - 完整strict-online receiver `[0,1]`评测。
 

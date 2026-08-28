@@ -69,6 +69,8 @@ def test_train_cli_accepts_forecast_representation(monkeypatch):
             "config.yaml",
             "--seed",
             "42",
+            "--lr",
+            "0.0005",
             "--forecast-bev-representation",
             "dual",
         ],
@@ -77,4 +79,54 @@ def test_train_cli_accepts_forecast_representation(monkeypatch):
     args = train_colif._arguments()
 
     assert args.seed == 42
+    assert args.lr == 5e-4
     assert args.forecast_bev_representation == "dual"
+
+
+def test_learning_rate_override_updates_optimizer_config():
+    hypes = {"optimizer": {"lr": 1e-4}}
+
+    value = train_colif._apply_learning_rate_override(hypes, 5e-4)
+
+    assert value == 5e-4
+    assert hypes["optimizer"]["lr"] == 5e-4
+
+
+@pytest.mark.parametrize("value", (0.0, -1e-4, float("inf"), float("nan")))
+def test_learning_rate_override_rejects_invalid_values(value):
+    with pytest.raises(ValueError, match="learning rate"):
+        train_colif._apply_learning_rate_override(
+            {"optimizer": {"lr": 5e-4}}, value
+        )
+
+
+def test_train_cli_rejects_mtr_checkpoint_initialization(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "train_colif",
+            "--hypes_yaml",
+            "config.yaml",
+            "--init-mtr-checkpoint",
+            "mtr.pth",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        train_colif._arguments()
+
+
+def test_grad_accum_override_is_checkpointed_in_config():
+    hypes = {"train_params": {"grad_accum_steps": 1}}
+
+    value = train_colif._apply_grad_accum_override(hypes, 4)
+
+    assert value == 4
+    assert hypes["train_params"]["grad_accum_steps"] == 4
+
+
+def test_grad_accum_override_rejects_nonpositive_values():
+    with pytest.raises(ValueError, match="grad_accum_steps"):
+        train_colif._apply_grad_accum_override(
+            {"train_params": {"grad_accum_steps": 1}}, 0
+        )

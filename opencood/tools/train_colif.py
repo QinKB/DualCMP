@@ -26,7 +26,6 @@ from opencood.tools.colif_train_utils import (
     configure_trainable_phase,
     load_colif_weights,
     load_cobevt_trunk,
-    load_mtr_decoder,
     resume_colif_checkpoint,
     save_colif_checkpoint,
     set_colif_train_mode,
@@ -44,7 +43,6 @@ def _arguments():
     parser.add_argument("--hypes_yaml", required=True)
     parser.add_argument("--output-dir", default="opencood/logs/colif_smoke")
     parser.add_argument("--init-cobevt-checkpoint")
-    parser.add_argument("--init-mtr-checkpoint")
     parser.add_argument("--init-colif-checkpoint")
     parser.add_argument("--resume")
     parser.add_argument("--epochs", type=int)
@@ -57,6 +55,11 @@ def _arguments():
     parser.add_argument("--grad-accum-steps", type=int)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument(
+        "--lr",
+        type=float,
+        help="Override the peak AdamW learning rate from the YAML config",
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -102,6 +105,34 @@ def _arguments():
         choices=("proposal", "refined"),
     )
     return parser.parse_args()
+
+
+def _apply_learning_rate_override(hypes: dict, learning_rate) -> float:
+    """Apply and return the positive finite peak learning rate."""
+
+    value = (
+        float(hypes["optimizer"]["lr"])
+        if learning_rate is None
+        else float(learning_rate)
+    )
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError("learning rate must be positive and finite")
+    hypes["optimizer"]["lr"] = value
+    return value
+
+
+def _apply_grad_accum_override(hypes: dict, grad_accum_steps) -> int:
+    """Apply and return gradient accumulation as checkpointed config."""
+
+    value = (
+        int(hypes["train_params"].get("grad_accum_steps", 1))
+        if grad_accum_steps is None
+        else int(grad_accum_steps)
+    )
+    if value < 1:
+        raise ValueError("grad_accum_steps must be positive")
+    hypes["train_params"]["grad_accum_steps"] = value
+    return value
 
 
 def _seed_everything(seed: int) -> None:
@@ -171,6 +202,7 @@ def main() -> None:
     args = _arguments()
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     hypes = load_yaml(args.hypes_yaml)
+    _apply_learning_rate_override(hypes, args.lr)
     receiver_ids = apply_receiver_override(hypes, args.receiver_ids)
     if args.seed is not None:
         if args.seed < 0:
@@ -339,11 +371,9 @@ def main() -> None:
     log_record({"phase_configuration": phase_report})
     criterion = train_utils.create_loss(hypes).to(device)
     optimizer = build_colif_optimizer(hypes, model)
-    grad_accum_steps = args.grad_accum_steps
-    if grad_accum_steps is None:
-        grad_accum_steps = int(hypes["train_params"].get("grad_accum_steps", 1))
-    if grad_accum_steps < 1:
-        raise ValueError("grad_accum_steps must be positive")
+    grad_accum_steps = _apply_grad_accum_override(
+        hypes, args.grad_accum_steps
+    )
     updates_per_epoch = math.ceil(len(loader) / grad_accum_steps)
     scheduler = train_utils.setup_lr_schedular(
         hypes, optimizer, updates_per_epoch
@@ -405,7 +435,7 @@ def main() -> None:
     global_step = 0
 
     if args.resume and any(
-        (args.init_cobevt_checkpoint, args.init_colif_checkpoint, args.init_mtr_checkpoint)
+        (args.init_cobevt_checkpoint, args.init_colif_checkpoint)
     ):
         raise ValueError(
             "--resume cannot be combined with initialization checkpoints"
@@ -418,9 +448,6 @@ def main() -> None:
     if args.init_colif_checkpoint:
         report = load_colif_weights(model, args.init_colif_checkpoint)
         log_record({"colif_initialization": report})
-    if args.init_mtr_checkpoint:
-        report = load_mtr_decoder(model, args.init_mtr_checkpoint)
-        log_record({"mtr_initialization": report})
     if args.resume:
         checkpoint = resume_colif_checkpoint(
             args.resume, model, optimizer, scaler, scheduler

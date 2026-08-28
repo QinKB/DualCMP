@@ -2,6 +2,14 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-28 — Scratch forecast training contract
+
+- `CP-20260828-05`取消训练与评测入口中的MTR checkpoint加载；Phase 2只恢复Phase-1检测/跟踪的406个tensors，完整forecast branch按seed随机初始化。MTR仅提供decoder结构和64个endpoint intentions。
+- 正式optimizer为AdamW，peak learning rate=`5e-4`、warmup=`2e-5`、cosine minimum=`2e-6`；双卡每卡batch 1、gradient accumulation 4，effective global batch 8。Gradient accumulation现写入checkpoint config hash；同配置resume成功，1改4时被明确拒绝。
+- 继承MTR但结构性未执行的decoder layer 1--5 `ca_qpos_proj`已冻结。`tests/colif`为135 passed/1 skipped；独立review无P0/P1。
+- 双卡真实1-batch AMP/DDP smoke完成optimizer step：unused trainable=0、overflow=0、parameter/buffer checksum delta=0。原始日志为`opencood/logs/smoke-dual-s20/train_log.jsonl`，SHA-256=`b8dc7b7940c363f3559a331bf88cab8bb2dde260e64b6015db85cc43e9be3195`；smoke checkpoint按合同删除且不得resume。
+- 风险：scratch forecast首批gradient norm=`64741.06`，被`phase2_max_grad_norm=1000`裁剪；20轮稳定性和结果仍需正式训练验证。
+
 ## 2026-08-28 — Dual representation + MTR intention-query refactor
 
 - `CP-20260828-04`按`模型架构更新.md`把正式预测改为fused consensus actor RoI + per-CAV source RoIs，两路由同一组MTR 64 endpoint intention queries分别读取；raw-64在六层训练，推理endpoint NMS到6。

@@ -19,10 +19,10 @@
 - Attention weights diagnose learned evidence allocation but do not establish that per-CAV features improve ADE/FDE.
 - Forecast representation comparisons must keep receiver IDs `[0,1]`, Phase-1 initialization, epoch count, batch/accumulation, metric protocol, tracker outputs, and actor support counts fixed.
 - Old velocity-anchor, direct-regression, flat-reader and source-refiner checkpoints/results do not validate the current model and cannot be resumed into it.
-- Phase 2 requires both the fixed Phase-1 checkpoint and the bundled CMP/MTR decoder checkpoint; cross-phase loading deliberately preserves newly initialized history/tokenizer/dual-attention parameters.
+- Phase 2 loads only the fixed Phase-1 detection/tracking checkpoint. The complete forecast branch is trained from random initialization; MTR contributes the decoder design and 64 endpoint intentions, not pretrained prediction weights.
 - New experiment IDs follow `<stage>-<variant>[-sN][-rN]`. Validate a proposed path with `check_run_id.py`, repeat with `--must-not-exist` before launch because the trainer appends to existing directories, and use explicit resume without renaming for an existing run.
 
 ## Open
 
 - Unverified: whether `dual` outperforms both `source` and `fused` under a matched formal run.
-- Pending: real dual-GPU smoke after the currently running legacy training releases both GPUs.
+- Pending: matched 20-epoch `dual`, `fused`, and `source` runs followed by strict-online evaluation.

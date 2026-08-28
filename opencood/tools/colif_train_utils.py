@@ -213,12 +213,6 @@ def load_cobevt_trunk(model, checkpoint_path: str) -> dict:
     }
 
 
-def load_mtr_decoder(model, checkpoint_path: str) -> dict:
-    """Warm-start the semantically identical bundled V2V4Real MTR decoder."""
-
-    return model.forecast_head.load_cmp_checkpoint(checkpoint_path)
-
-
 def load_colif_weights(model, checkpoint_path: str) -> dict:
     """Initialize a later phase from parameters trained by the source phase.
 

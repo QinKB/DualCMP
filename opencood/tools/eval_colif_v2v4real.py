@@ -72,14 +72,6 @@ def _arguments():
             "metric computation"
         ),
     )
-    parser.add_argument(
-        "--diagnostic-reload-mtr-checkpoint",
-        help=(
-            "Diagnostic-only: replace the checkpoint's forecast weights with "
-            "an original CMP/MTR checkpoint while preserving the same online "
-            "tracker, targets, matching, coverage, and metric implementation"
-        ),
-    )
     parser.add_argument("--diagnostic-min-forecast-history", type=int)
     parser.add_argument("--diagnostic-disable-actor-cooperative-fusion", action="store_true")
     parser.add_argument("--diagnostic-disable-temporal-history", action="store_true")
@@ -119,12 +111,6 @@ def main():
         if not hasattr(model.forecast_head, "temporal_history_enabled"):
             raise ValueError("checkpoint forecast head has no temporal-history branch")
         model.forecast_head.temporal_history_enabled = False
-    mtr_reload_report = None
-    if args.diagnostic_reload_mtr_checkpoint:
-        model.forecast_head.enabled = True
-        mtr_reload_report = model.forecast_head.load_cmp_checkpoint(
-            args.diagnostic_reload_mtr_checkpoint
-        )
     if args.force_measurement_gain is not None:
         gain = float(args.force_measurement_gain)
         if not 0.0 <= gain <= 1.0:
@@ -171,11 +157,6 @@ def main():
             None if args.future_prior_mode == "checkpoint"
             else args.future_prior_mode
         ),
-        "diagnostic_reloaded_mtr_checkpoint": (
-            str(Path(args.diagnostic_reload_mtr_checkpoint).resolve())
-            if args.diagnostic_reload_mtr_checkpoint else None
-        ),
-        "diagnostic_mtr_reload_report": mtr_reload_report,
         "diagnostic_min_forecast_history": (
             args.diagnostic_min_forecast_history
         ),
