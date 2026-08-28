@@ -2,6 +2,14 @@
 
 本文件只保留仍影响当前实现、实验或恢复的里程碑。2026-08-24 以前的详细实验 chronology 可从 Git 历史读取；被拒绝路线的根因见 `docs/colif_failure_postmortem.md`。
 
+## 2026-08-28 — Dual representation + MTR intention-query refactor
+
+- `CP-20260828-04`按`模型架构更新.md`把正式预测改为fused consensus actor RoI + per-CAV source RoIs，两路由同一组MTR 64 endpoint intention queries分别读取；raw-64在六层训练，推理endpoint NMS到6。
+- 删除velocity-scale anchors、12 m residual、pairwise-median motion descriptor、source-neighbour pooling、旧MTR adapter、residual prototypes及lateral/multiscale hand diagnostics。History改为masked learned temporal encoder；actor interaction只由MTR object decoder负责。
+- 独立reviewer发现并推动修复MTR legacy local frame与source patch position错配、dual双残差幅度混杂及attention图字段错误。最终两路按`sqrt(active_paths)`缩放并经共享post-norm，nonzero-yaw position test直接与loss transform对齐。
+- 验证：`tests/colif` 126 passed/1 skipped；Phase-1 406 tensors和MTR decoder 714 tensors均strict load且missing/unexpected为空；`dual/fused/source`均为70,114,268 trainable、270,445,615 total parameters和491个trainable tensors。
+- 限制：两张GPU被启动于本次refactor之前的legacy `train-modeobj-s20`占用，本次未中断该用户进程；当前结构的真实双卡AMP/DDP smoke和性能实验尚未运行。
+
 ## 2026-08-28 — Phase-2 batch/worker资源闸门
 
 - 当前主机资源为24 logical CPUs、约128 GiB RAM和2张24 GiB RTX 3090；检查时GPU空闲、磁盘可用约450 GB。

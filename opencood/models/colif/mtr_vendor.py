@@ -12,7 +12,8 @@ if str(MTR_ROOT) not in sys.path:
     sys.path.insert(0, str(MTR_ROOT))
 
 from mtr.models_v2v4real.motion_decoder.mtr_decoder import MTRDecoder
+from mtr.models_v2v4real.utils.transformer import position_encoding_utils
 from mtr.utils.motion_utils import batch_nms
 
 
-__all__ = ["MTRDecoder", "batch_nms"]
+__all__ = ["MTRDecoder", "batch_nms", "position_encoding_utils"]

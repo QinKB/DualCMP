@@ -81,19 +81,6 @@ def configure_trainable_phase(model, phase: int) -> dict:
     for module in trainable_modules:
         for parameter in module.parameters():
             parameter.requires_grad = True
-    # The V2V4Real decoder's later cross-attention layers deliberately reuse
-    # the first layer's query-position projection, while only the final mode
-    # classifier is consumed by our online adapter.  Do not leave these known
-    # dead branches trainable: asymmetric active-actor counts otherwise force
-    # DDP to reason about parameters that can never receive a gradient.
-    decoder = getattr(model.forecast_head, "decoder", None)
-    if decoder is not None:
-        for layer in decoder.obj_decoder_layers[1:]:
-            for parameter in layer.ca_qpos_proj.parameters():
-                parameter.requires_grad = False
-        for head in decoder.motion_cls_heads[:-1]:
-            for parameter in head.parameters():
-                parameter.requires_grad = False
     # CoLIF always supplies metric reference points explicitly; MOTR's
     # optional learned reference-point layer is bypassed in this contract.
     transformer = getattr(model.query_decoder, "transformer", None)

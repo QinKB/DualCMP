@@ -52,7 +52,7 @@ class ActorAlignedSourceTokenizer(nn.Module):
             self.input_dim, self.query_dim, bias=False
         )
         self.offset_projection = nn.Sequential(
-            nn.Linear(4, self.query_dim),
+            nn.Linear(2, self.query_dim),
             nn.GELU(),
             nn.Linear(self.query_dim, self.query_dim),
         )
@@ -99,17 +99,29 @@ class ActorAlignedSourceTokenizer(nn.Module):
         ) - 1.0
         grid = torch.stack((grid_x, grid_y), dim=-1)
         spatial_valid = (grid.abs() <= 1.0).all(dim=-1)
-        # Preserve metric actor-local offsets as well as absolute receiver
-        # position.  Unit offsets alone make equal grid cells from differently
-        # sized actors geometrically indistinguishable.
+        # MTR's released V2V4Real intentions were clustered in its legacy local
+        # frame, where numeric degree headings were consumed as radians.  The
+        # physical sampling grid remains correct; only the positional value
+        # supplied to intention attention is expressed in that same frame.
+        receiver_offset_x = receiver_x - actor_boxes[..., 0, None]
+        receiver_offset_y = receiver_y - actor_boxes[..., 1, None]
+        decoder_heading = torch.rad2deg(yaw)
+        decoder_cosine = torch.cos(decoder_heading)
+        decoder_sine = torch.sin(decoder_heading)
+        decoder_local_x = (
+            decoder_cosine * receiver_offset_x
+            + decoder_sine * receiver_offset_y
+        )
+        decoder_local_y = (
+            -decoder_sine * receiver_offset_x
+            + decoder_cosine * receiver_offset_y
+        )
         half_x_range = 0.5 * (self.x_max - self.x_min)
         half_y_range = 0.5 * (self.y_max - self.y_min)
         position_input = torch.stack(
             (
-                local_x / half_x_range,
-                local_y / half_y_range,
-                grid_x,
-                grid_y,
+                decoder_local_x / half_x_range,
+                decoder_local_y / half_y_range,
             ),
             dim=-1,
         )
@@ -155,18 +167,6 @@ class ActorAlignedSourceTokenizer(nn.Module):
         )[:, :, None].expand(
             batch, queries, sources, patch_tokens, self.query_dim
         )
-        actor_position_input = position_input.new_zeros(
-            batch, queries, 4
-        )
-        actor_position_input[..., 2] = 2.0 * (
-            actor_boxes[..., 0] - self.x_min
-        ) / (self.x_max - self.x_min) - 1.0
-        actor_position_input[..., 3] = 2.0 * (
-            actor_boxes[..., 1] - self.y_min
-        ) / (self.y_max - self.y_min) - 1.0
-        actor_position = self.offset_projection(
-            actor_position_input.to(tokens)
-        )
         token_mask = (
             actor_valid_mask.bool()[..., None, None]
             & cav_mask.bool()[:, None, :, None]
@@ -178,15 +178,9 @@ class ActorAlignedSourceTokenizer(nn.Module):
         position = torch.where(
             token_mask[..., None], position, torch.zeros_like(position)
         )
-        actor_position = torch.where(
-            actor_valid_mask.bool()[..., None],
-            actor_position,
-            torch.zeros_like(actor_position),
-        )
         return {
             "tokens": tokens,
             "positions": position,
-            "actor_positions": actor_position,
             "token_mask": token_mask,
             "sampling_grid": grid,
         }

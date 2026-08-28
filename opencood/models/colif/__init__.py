@@ -7,12 +7,11 @@ historical ablations, but are not exported by the main package.
 from opencood.models.colif.state import GlobalForecastState
 from opencood.models.colif.actor_context import ActorContextEncoder
 from opencood.models.colif.future_adapter import FutureAdapter
-from opencood.models.colif.motion_anchored_forecast import (
-    MotionAnchoredForecastHead,
+from opencood.models.colif.intention_query_forecast import (
+    IntentionQueryForecastHead,
 )
 from opencood.models.colif.persistent_query_decoder import PersistentQueryDecoder
 from opencood.models.colif.temporal_memory import TemporalQueryMemory
-from opencood.models.colif.persistent_query_mtr import PersistentQueryMTRAdapter
 from opencood.models.colif.dense_measurement import DenseMeasurementProposalGenerator
 from opencood.models.colif.measurement_state_update import MeasurementStateUpdate
 from opencood.models.colif.forecast_motion_prior import ForecastMotionPrior
@@ -24,10 +23,9 @@ __all__ = [
     "GlobalForecastState",
     "ActorContextEncoder",
     "FutureAdapter",
-    "MotionAnchoredForecastHead",
+    "IntentionQueryForecastHead",
     "PersistentQueryDecoder",
     "TemporalQueryMemory",
-    "PersistentQueryMTRAdapter",
     "DenseMeasurementProposalGenerator",
     "MeasurementStateUpdate",
     "ForecastMotionPrior",

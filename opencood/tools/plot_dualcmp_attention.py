@@ -265,7 +265,7 @@ def _capture_example(
         )
         source_crops.append(_display_normalize(crop))
         source_extents.append(extent)
-    attention = outputs["cooperative_attention_weights"][
+    attention = outputs["source_attention_weights"][
         0, query_index
     ].detach().float()
     cav_mask = aux["cav_mask"][0].detach().bool()
@@ -633,7 +633,7 @@ def _collect_rank(
                 support = support_index(bits)
                 if support is None:
                     continue
-                attention = outputs["cooperative_attention_weights"][0, query_index]
+                attention = outputs["source_attention_weights"][0, query_index]
                 cav_mask = aux["cav_mask"][0].bool()
                 if attention.shape[0] < 2 or not bool(cav_mask[1]):
                     continue

@@ -89,26 +89,11 @@ def _arguments():
     parser.add_argument("--disable-actor-cooperative-fusion", action="store_true")
     parser.add_argument(
         "--forecast-bev-representation",
-        choices=("per_cav", "fused"),
+        choices=("dual", "fused", "source"),
         help=(
-            "Forecast-only spatial input: aligned per-CAV BEVs for DualCMP "
-            "or one fused-BEV actor patch for the controlled baseline"
+            "Forecast representation: fused consensus + per-CAV source evidence, "
+            "or either controlled single-representation ablation"
         ),
-    )
-    parser.add_argument(
-        "--source-aggregation",
-        choices=("attention", "mean"),
-        help="Retired legacy flat source aggregation (rejected if supplied)",
-    )
-    parser.add_argument(
-        "--source-geometry",
-        choices=("on", "off"),
-        help="Retired relative-geometry branch (rejected if supplied)",
-    )
-    parser.add_argument(
-        "--forecast-trajectory-parameterization",
-        choices=("anchored", "direct"),
-        help="Predict bounded residuals around motion anchors or direct displacements",
     )
     parser.add_argument("--disable-temporal-history", action="store_true")
     parser.add_argument("--disable-proposal-refinement", action="store_true")
@@ -133,22 +118,6 @@ def _seed_data_worker(_worker_id: int) -> None:
     worker_seed = torch.initial_seed() % (2 ** 32)
     random.seed(worker_seed)
     np.random.seed(worker_seed)
-
-
-def _apply_forecast_ablation_overrides(hypes: dict, args) -> None:
-    forecast = hypes["model"]["args"]["forecast"]
-    if args.source_aggregation is not None:
-        raise ValueError(
-            "--source-aggregation belongs to the retired flat source reader"
-        )
-    if args.source_geometry is not None:
-        raise ValueError(
-            "--source-geometry belongs to the retired flat source reader"
-        )
-    if args.forecast_trajectory_parameterization is not None:
-        forecast["trajectory_parameterization"] = (
-            args.forecast_trajectory_parameterization
-        )
 
 
 def _ddp_parameter_sync_report(model, device):
@@ -214,7 +183,6 @@ def main() -> None:
         hypes["model"]["args"]["actor_cooperative_fusion"][
             "representation"
         ] = args.forecast_bev_representation
-    _apply_forecast_ablation_overrides(hypes, args)
     if args.disable_temporal_history:
         hypes["model"]["args"]["forecast"]["temporal_history"] = False
     if args.disable_proposal_refinement:
@@ -363,15 +331,10 @@ def main() -> None:
     phase_report = configure_trainable_phase(model, phase)
     phase_report.update({
         "forecast_bev_representation": model.forecast_bev_representation,
-        "source_aggregation": model.source_aggregation,
-        "source_geometry": (
-            "on" if model.source_geometry_conditioning else "off"
-        ),
-        "trajectory_parameterization": getattr(
-            model.forecast_head,
-            "trajectory_parameterization",
-            None,
-        ),
+        "forecast_architecture": "intention_query",
+        "raw_intention_modes": model.forecast_head.raw_modes,
+        "output_modes": model.forecast_head.modes,
+        "decoder_layers": model.forecast_head.decoder_layers,
     })
     log_record({"phase_configuration": phase_report})
     criterion = train_utils.create_loss(hypes).to(device)

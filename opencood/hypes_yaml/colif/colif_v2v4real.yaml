@@ -164,8 +164,8 @@ model:
       innovation_scale_m: 4.0
     actor_cooperative_fusion:
       enabled: true
-      # per_cav is DualCMP; fused is the protocol-matched forecast baseline.
-      representation: per_cav
+      # dual is the formal model; fused/source are representation ablations.
+      representation: dual
       input_dim: 256
       # Proposal-aligned 2-D RoI pooling keeps source and spatial dimensions
       # explicit until the motion modes perform cross-attention.
@@ -173,7 +173,7 @@ model:
       roi_scale: 2.0
       minimum_half_extent_m: 1.0
     state:
-    # Keep at most eleven online observations for robust motion anchors.
+    # Keep at most eleven online observations for causal motion encoding.
       memory_len: 11
       # Preserve the Phase-1 tracker GRU's four-step input contract; the
       # longer history is consumed only by the motion forecaster.
@@ -185,25 +185,17 @@ model:
       keep_threshold: 0.2
       birth_suppression_radius: 2.0
     forecast:
-      architecture: motion_anchored
+      architecture: intention_query
       enabled: false
       history_frames: 11
       frame_period_s: 0.1
-      # Kept for the optional cmp_mtr ablation; the selected motion-anchored
-      # head uses frame_period_s directly.
-      cmp_timestamp_scale: 0.1
-      context_neighbors: 16
-      context_mlp_channels: 256
-      context_mlp_layers: 3
-      context_dim: 256
-      context_layers: 6
-      context_heads: 8
-      context_local_attention: true
       modes: 6
       future_frames: 50
       d_model: 512
       decoder_layers: 6
       attention_heads: 8
+      # Retain the published decoder shape so --init-mtr-checkpoint loads
+      # strictly; the map branch remains frozen in V2V4Real's map-free path.
       map_d_model: 256
       dropout: 0.1
       intention_random_init: false
@@ -215,22 +207,13 @@ model:
       # interaction context so they cannot corrupt mature center predictions.
       min_forecast_history_steps: 2
       min_context_history_steps: 2
-      motion_anchor_scales: [0.0, 0.5, 0.75, 1.0, 1.25, 1.5]
-      trajectory_parameterization: anchored
       temporal_history: true
       history_encoder_layers: 2
       history_encoder_heads: 8
       history_encoder_ffn: 1024
-      motion_context_layers: 2
-      motion_context_heads: 8
-      motion_context_ffn: 1024
+      history_size_scale: [3.0, 3.0, 8.0]
       source_attention_heads: 8
-      source_attention_ffn: 1024
-      motion_residual_limit_m: 12.0
-      # Query yaw is a direct neural measurement whereas CMP trained MTR on
-      # AB3DMOT-filtered headings.  Restore that past-only smoothing at the
-      # adapter boundary before applying CMP's legacy degree-valued transform.
-      heading_smoothing_steps: 5
+      source_attention_ffn: 2048
       # Ages 1--11 already occur naturally when every chronological training clip
       # starts from an empty online state.  Extra random truncation previously
       # made mature histories a tiny minority and damaged the dominant test

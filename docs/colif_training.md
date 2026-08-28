@@ -1,96 +1,46 @@
-# CoLIF 当前训练、恢复与评测
+# DualCMP Training and Evaluation
 
-从 `/home/qkb/Project/CoLIF` 执行，环境为 `coop`。当前正式模型只有两个训练阶段，没有 Phase 3：
+本文件是当前结构唯一可执行命令来源。正式模型为`dual`：fused consensus actor RoI与per-CAV source actor RoIs同时进入MTR 64 intention queries。旧`per_cav`、motion-anchor、direct regression、source-refiner和旧MTR adapter命令均已失效。
 
-```text
-Phase 1: CMP fused-BEV persistent-query tracking（forecast关闭）
-Phase 2: 冻结感知/跟踪，训练cooperative motion forecast
-```
-
-正式协议为 official `train` 优化、固定末轮自动评测 official `test`；不构造 val、不按 test 指标自动选择 best。论文必须披露 repeated-test monitoring。
-
-## 当前最小资产集
-
-项目只保留当前训练、评测和投稿实验仍会使用的权重与原始指标：
+## 1. Fixed assets
 
 ```text
-pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth
+Phase-1 tracker:
 opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth
-opencood/logs/colif_paper_phase1_20e_seed20/{train_log,metrics_test}.jsonl
-opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth
-opencood/logs/dualcmp_v2_full_receiver01_seed20_20e_20260821/{train_log,metrics_test}.jsonl
-opencood/logs/dualcmp_fused_receiver01_seed20_20e_20260823/
+
+CMP/MTR decoder:
 MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth
-MTR/output/v2v4real_multiego_cobevt_c256_no_agg/ckpt/best_model.pth
+
+64 endpoint intentions:
+preprocessed_data/v2v4real/v2v4real_cluster_64_center_dict.pkl
+
+Formal config:
+opencood/hypes_yaml/colif/colif_v2v4real.yaml
 ```
 
-最后一个 `opencood` 目录保存已完成的 fused seed-20 训练、epoch-19 checkpoint 和独立 `online_masked` 评测。其余历史 phase、profile、旧 refiner、single-receiver 和旧协议 checkpoint 已从工作区删除；需要追溯时使用 Git 历史中的 `LOG.md`，不能把历史结果恢复为当前论文证据。
+Receiver协议固定为`0,1`。正式test使用`online_masked`，每个run只评测固定末轮checkpoint，不按test选择epoch。
 
-`preprocessed_data/v2v4real/fused_features_point_pillar_cobevt_multiego_256x` 约 105 GiB，但它不是日志或冗余权重。当前 MTR/CMP 配置直接把它作为 `cobevt_fused_features_dir`，投稿前尚需完成 learned baselines，因此暂时保留；删除后必须重新提取整套 fused features。相关 tracking/GT caches 同理保留到 MTR/CMP 协议对照结束。
-
-## Receiver / ego 协议
-
-默认 `receiver_ids: [0]`，即只以 CAV 0 为 receiver。若要严格采用 CMP 的 multi-ego 数据增广，在 **Phase 1、Phase 2、独立评测与推理** 命令中均添加：
+## 2. Preflight
 
 ```bash
---receiver-ids 0,1
-```
-
-此时 CAV 0 和 CAV 1 各自轮流作为 receiver：对每个 receiver，其他 CAV 点云先变换到该 receiver 坐标系，receiver 本身始终位于 source slot 0，online query state 以 `(scene, receiver)` 独立重置。它会增加 receiver-centric clips；必须从 Phase 1 重新训练，并以同一 receiver 协议训练/评测，不能把旧的 `[0]` checkpoint 结果与 `[0,1]` 结果混报。`--resume` 会因配置 hash 不同拒绝跨协议恢复。
-
-## 1. 依赖预检
-
-首次运行或 Python/PyTorch/CUDA 变化后编译固定 MOTR deformable-attention：
-
-```bash
-cd /home/qkb/Project/CoLIF/third_party/MOTR/models/ops
-conda run --no-capture-output -n coop sh make.sh
-cd /home/qkb/Project/CoLIF
-```
-
-运行回归：
-
-```bash
-conda run --no-capture-output -n coop python -m pytest -q tests/colif
-```
-
-## 2. Phase 1：fused query tracking
-
-```bash
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 1 --batch-size 2 \
-  --init-cobevt-checkpoint \
-  pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
-  --output-dir opencood/logs/train-p1-s20 \
-  --epochs 20 --workers 2 --eval-workers 2 --seed 20 --log-every 50
+
+PYTHONPATH=/home/qkb/Project/CoLIF \
+  conda run --no-capture-output -n coop \
+  python -m pytest -q tests/colif
 ```
 
-Phase 1 使用 FP32。当前论文实验统一从第 3 节所列的 seed-20 epoch-9 Phase-1 checkpoint 初始化；旧单轮诊断使用的 tracker 已清理，不能与当前 receiver `[0,1]`、20-epoch 协议混用。
-
-## 3. Phase 2：mode-conditioned source feature fusion
-
-当前结构使用 actor-aligned RoI tokenizer 保留目标actor的`[L,P,D]`细粒度
-source tokens；其他actor只在各source内部做标准RoI max pooling。带physical-anchor
-encoding的motion queries直接cross-attend目标局部tokens与邻居actor-source tokens，
-最后进入唯一anchored GMM head。模型没有point-occupancy support、relative geometry、
-availability router、trajectory refiner或第二套预测输出。
-
-当前双RTX 3090主机推荐每卡batch 4、每rank 4个DataLoader workers、梯度累积1。
-它与已验证的一轮配置`batch 2 x 2 GPUs x accumulation 2`保持相同有效global
-batch 8和每epoch 428 optimizer updates。真实5-batch双卡smoke中，`4/4/1`
-处理样本的吞吐约比`2/2/2`提高43%，且unused trainable=0、AMP overflow=0、
-DDP parameter/buffer checksum delta=0。若以后出现显存不足或其他任务占用GPU，
-退回`--batch-size 2 --grad-accum-steps 2 --workers 2`，不要改变有效global batch。
-
-启动前检查新run目录：
+新run启动前必须检查目录不存在：
 
 ```bash
 python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-  /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-s20 --must-not-exist
+  /home/qkb/Project/CoLIF/opencood/logs/<run-id> --must-not-exist
 ```
+
+## 3. Phase 1 tracking
+
+当前论文实验复用上面的固定Phase-1 checkpoint。只有需要重训tracker时才运行：
 
 ```bash
 cd /home/qkb/Project/CoLIF || exit 1
@@ -98,297 +48,108 @@ ulimit -n 65536
 PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
   conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml \
-  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --phase 1 --batch-size 2 --workers 2 --eval-workers 2 \
+  --init-cobevt-checkpoint \
+  /home/qkb/Project/CoLIF/pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-p1-s20 \
+  --epochs 20 --receiver-ids 0,1 --seed 20 --log-every 50
+```
+
+## 4. Phase 2 formal DualCMP
+
+MTR V2V4Real原配置每GPU batch为1。当前新decoder在完成GPU smoke前也使用保守的每卡batch 1、梯度累积4；双卡effective global batch为8。
+
+```bash
+cd /home/qkb/Project/CoLIF || exit 1
+ulimit -n 65536
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
+  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
+  --hypes_yaml /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
   /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-s20 \
-  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
-  --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
+  --init-mtr-checkpoint \
+  /home/qkb/Project/CoLIF/MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-dual-s20 \
+  --epochs 20 --batch-size 1 --grad-accum-steps 4 --workers 2 \
+  --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
   --no-eval --log-every 50
-
 ```
 
-旧20轮结果属于已替换的flat actor-source reader；只能作为历史基线，不能加载为
-当前结构的训练恢复点：
+不得省略`--init-mtr-checkpoint`：Phase-1 checkpoint故意不导入其未训练的forecast参数。
+
+## 5. Required representation ablations
+
+只做三个同协议实验：
+
+| run | flag | purpose |
+| --- | --- | --- |
+| `train-dual-s20` | `dual` | fused consensus + source evidence |
+| `train-fused-s20` | `fused` | fused consensus only |
+| `train-source-s20` | `source` | per-CAV source evidence only |
+
+三者使用同一Phase-1 checkpoint、MTR checkpoint、seed、epoch、batch、optimizer、receiver和test population。运行`fused`或`source`时，只替换主命令中的两项：
 
 ```text
-opencood/logs/dualcmp_core_receiver01_seed20_20e_20260821/checkpoint_epoch_019.pth
-online-masked ADE@1/3/5s = 0.8515 / 1.4083 / 1.9350 m
-online-masked FDE@1/3/5s = 1.0310 / 2.1841 / 3.2465 m
-MOTA=0.6504, forecast coverage=0.8049
-```
-
-## 4. 一轮 fused-BEV / per-CAV BEV 结构闸门
-
-`--disable-actor-cooperative-fusion` 会把预测上下文置零，它只能作为
-no-context 诊断，不能作为 fused-BEV 基线。正式表示消融必须保持同一个
-tokenizer、mode decoder、forecast head、tracker 和训练协议，只改变预测端空间输入：
-
-```bash
-# fused-BEV actor RoI tokens
+--output-dir /home/qkb/Project/CoLIF/opencood/logs/train-fused-s20
 --forecast-bev-representation fused
 
-# aligned per-CAV actor RoI tokens
---forecast-bev-representation per_cav
+--output-dir /home/qkb/Project/CoLIF/opencood/logs/train-source-s20
+--forecast-bev-representation source
 ```
 
-两种模式的总参数量相同。fused 模式把 `fused_bev.unsqueeze(1)` 作为唯一
-receiver-frame source；per_cav 模式使用
-`regrouped_source_bev[B,L,C,H,W]`。检测、跟踪、query、history、motion
-anchors 和 loss 均保持不变。
+`--disable-actor-cooperative-fusion`是no-evidence诊断，不是论文中的fused baseline。
 
-先用一轮同预算闸门判断新结构是否值得长训。启动前必须分别运行：
+## 6. Smoke
 
-```bash
-python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-  opencood/logs/train-modeattn-percav-e1-s20 --must-not-exist
-python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-  opencood/logs/train-modeattn-fused-e1-s20 --must-not-exist
-```
-
-per-CAV一轮训练：
+GPU空闲后，先用独立目录运行1 batch；成功标准为真实dataset forward/loss/backward/optimizer均完成，64 queries、6 layers、两路tokenizer均有梯度，无AMP overflow、NaN、unused trainable或DDP checksum差异。
 
 ```bash
+cd /home/qkb/Project/CoLIF || exit 1
 ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --hypes_yaml /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
   --phase 2 \
   --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeattn-percav-e1-s20 \
-  --epochs 1 --batch-size 2 --grad-accum-steps 2 --workers 2 \
-  --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 20 \
-  --no-eval --log-every 50
+  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
+  --init-mtr-checkpoint \
+  /home/qkb/Project/CoLIF/MTR/output/v2v4real_multiego_cobevt_c256/ckpt/best_model.pth \
+  --output-dir /home/qkb/Project/CoLIF/opencood/logs/smoke-dual-s20 \
+  --epochs 1 --smoke-batches 1 \
+  --batch-size 1 --grad-accum-steps 1 --workers 1 \
+  --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
+  --no-eval --log-every 1
 ```
 
-fused一轮训练只改变representation与输出目录：
+Smoke目录不能作为性能结果或正式resume起点。
+
+## 7. Resume
+
+只允许完全相同结构和config hash：
 
 ```bash
-ulimit -n 65536
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/train-modeattn-fused-e1-s20 \
-  --epochs 1 --batch-size 2 --grad-accum-steps 2 --workers 2 \
-  --receiver-ids 0,1 --forecast-bev-representation fused --seed 20 \
-  --no-eval --log-every 50
+--resume /home/qkb/Project/CoLIF/opencood/logs/<run-id>/checkpoint_epoch_NNN.pth
 ```
 
-两组必须使用epoch-0 checkpoint独立完整评测。例如per-CAV：
+`--resume`不能与任何`--init-*-checkpoint`同时使用。旧motion-anchor/flat-reader checkpoint禁止resume到当前模型。
+
+## 8. Strict-online test
 
 ```bash
-PYTHONPATH=. CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
+cd /home/qkb/Project/CoLIF || exit 1
+PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
+  conda run --no-capture-output -n coop \
   torchrun --standalone --nproc_per_node=2 \
   -m opencood.tools.eval_colif_v2v4real \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --checkpoint \
-  opencood/logs/train-modeattn-percav-e1-s20/checkpoint_epoch_000.pth \
-  --split test --workers 2 --receiver-ids 0,1 \
+  --hypes_yaml /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
+  --checkpoint /home/qkb/Project/CoLIF/opencood/logs/<run-id>/checkpoint_epoch_019.pth \
+  --split test --receiver-ids 0,1 --workers 2 \
   --forecast-metric-protocol online_masked \
-  --output \
-  opencood/logs/train-modeattn-percav-e1-s20/metrics_test_online_masked.json
+  --output /home/qkb/Project/CoLIF/opencood/logs/<run-id>/metrics_test_online_masked.json
 ```
 
-一轮结果只作为结构筛选，不进入论文最终表格。只有per-CAV在overall和
-partner-only的ADE/FDE方向均优于同结构fused，且训练/coverage完全可比，
-才考虑后续实验。
-
-### 已验证的一轮闸门（seed 20）
-
-两组均从Phase-1 epoch-9初始化，完成428 updates和完整receiver`[0,1]`
-`online_masked` test：
-
-| Representation | ADE@1s | ADE@3s | ADE@5s | FDE@1s | FDE@3s | FDE@5s |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| fused BEV | 1.1222 | 1.7635 | 2.2478 | 1.3906 | 2.4541 | 3.4423 |
-| per-CAV BEV | **1.0908** | **1.7243** | **2.1993** | **1.3634** | **2.4274** | **3.3825** |
-
-per-CAV六项分别改善`2.80%/2.22%/2.16%`和`1.95%/1.09%/1.74%`。
-两组均覆盖3,986 frames、52,597 matched actor frames，forecast coverage均为
-`0.804925`。partner-only 5 s ADE/FDE改善`0.61%/0.84%`，shared改善
-`4.61%/2.85%`。原始证据保存在两个run目录的`train_log.jsonl`和
-`metrics_test_online_masked.json`。总体MR中，per-CAV的2.0 m MR@5s轻微恶化
-`0.34%`，其余2.0 m MR@1/3s和3.6 m MR@1/3/5s更好；因此结论限定为
-ADE/FDE方向一致，而不是所有指标无条件占优。一轮结果不进入论文最终表格。
-
-训练入口会创建或复用输出目录并追加日志，因此检查失败时必须改用新 run ID；
-恢复既有任务只能走第 7 节的显式 `--resume` 路径。
-
-旧 one-epoch no-source/no-history 诊断属于早期 single-receiver 研究阶段，既不进入当前论文表格，也不能替代 fused/per-CAV 表示消融；其日志和 checkpoint 已清理。若未来重新研究 ordered history，必须从当前 Phase-1 checkpoint 按 receiver `[0,1]` 和 20-epoch 协议重新训练。
-
-## 5. 当前结构的20轮消融
-
-最小必要集合为Full、fused BEV和Direct Regression。只有论文将ordered temporal
-history列为独立贡献时，才增加`w/o Temporal History`。`--disable-actor-cooperative-fusion`
-会删除全部预测上下文，不是fused基线；当前没有合法的`w/o Neighbour Interaction`
-开关，不能用修改`max_active_queries`等方式伪造该消融。
-
-启动前统一检查：
-
-```bash
-for run in \
-  train-modeobj-fused-s20 \
-  train-modeobj-direct-s20 \
-  train-modeobj-nohist-s20
-do
-  python /home/qkb/.agents/skills/code-implementation/scripts/check_run_id.py \
-    "/home/qkb/Project/CoLIF/opencood/logs/${run}" --must-not-exist
-done
-```
-
-### 5.1 fused BEV（必须）
-
-```bash
-cd /home/qkb/Project/CoLIF || exit 1
-ulimit -n 65536
-PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
-  conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml \
-  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-fused-s20 \
-  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
-  --receiver-ids 0,1 --forecast-bev-representation fused --seed 20 \
-  --no-eval --log-every 50
-```
-
-### 5.2 Direct Regression（motion-anchor消融，必须）
-
-```bash
-cd /home/qkb/Project/CoLIF || exit 1
-ulimit -n 65536
-PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
-  conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml \
-  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-direct-s20 \
-  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
-  --receiver-ids 0,1 --forecast-bev-representation per_cav \
-  --forecast-trajectory-parameterization direct --seed 20 \
-  --no-eval --log-every 50
-```
-
-### 5.3 w/o Temporal History（仅在论文主张该组件时运行）
-
-```bash
-cd /home/qkb/Project/CoLIF || exit 1
-ulimit -n 65536
-PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
-  conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml \
-  /home/qkb/Project/CoLIF/opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-modeobj-nohist-s20 \
-  --epochs 20 --batch-size 4 --grad-accum-steps 1 --workers 4 \
-  --receiver-ids 0,1 --forecast-bev-representation per_cav \
-  --disable-temporal-history --seed 20 \
-  --no-eval --log-every 50
-```
-
-所有变体必须独立训练20轮，并使用各自`checkpoint_epoch_019.pth`执行完整
-`online_masked` test。不能从Full或其他变体checkpoint执行`--resume`，也不能用
-一轮闸门数值填20轮消融表。
-
-## 6. 旧flat reader消融记录
-
-`w/o Relative Geometry`与旧`mean`开关属于已经替换的flat actor-source reader。
-训练入口现在显式拒绝`--source-aggregation`、`--source-geometry`、
-`--disable-proposal-refinement`和`--forecast-inference-layer`，防止新旧网络混训。
-旧数值只保留用于失败复盘；不得用下列历史checkpoint恢复当前结构。
-
-历史`online_masked`结果：
-
-```text
-w/o Relative Geometry (epoch 19)
-ADE@1/3/5s = 0.849644 / 1.414029 / 1.948706
-FDE@1/3/5s = 1.032063 / 2.190736 / 3.249115
-
-w/o Motion Anchors (epoch 19)
-ADE@1/3/5s = 1.270013 / 2.307474 / 3.119810
-FDE@1/3/5s = 1.794235 / 3.912687 / 5.568135
-```
-
-现有geometry-off epoch-19来自每卡batch 2、428 updates/epoch，共8,560 updates；
-现有direct epoch-19实际来自每卡batch 4、214 updates/epoch，共4,280 updates。因此
-direct数值只能作为当前direct-regression formulation的
-结果；严格的motion-anchor单模块归因需要按上方匹配命令重训。
-
-对应证据文件为`opencood/logs/train-query-s20/metrics_test_online_masked_epoch019.json`和
-`opencood/logs/train-direct-s20/metrics_test_online_masked.json`。
-
-## 7. 同阶段断点恢复
-
-`--resume` 仅用于同一结构、同一阶段、同一配置恢复 model/optimizer/scheduler/scaler/epoch/global step：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --resume /path/to/checkpoint_epoch_000.pth \
-  --output-dir /path/to/resume_output \
-  --epochs 2 --workers 2 --eval-workers 2
-```
-
-配置 hash 不一致会拒绝 resume。跨阶段只能使用 `--init-colif-checkpoint`。由旧 wrapper 提取的 `dualcmp_core_receiver01_seed20_20e_20260821` 是仅供推理和评测的 checkpoint，不含可恢复的 optimizer/scheduler/scaler state。
-
-## 8. 双卡 smoke
-
-```bash
-ulimit -n 65536
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 -m opencood.tools.train_colif \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --phase 2 \
-  --init-colif-checkpoint \
-  opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
-  --output-dir opencood/logs/smoke-modeobj-percav-s21 \
-  --epochs 1 --batch-size 2 --grad-accum-steps 2 --workers 2 \
-  --receiver-ids 0,1 --forecast-bev-representation per_cav --seed 21 \
-  --smoke-batches 5 --no-eval --log-every 1
-```
-
-只有 smoke 可用 `--smoke-force-birth`；任何 smoke/截断 test 数字都不能作为论文性能。
-
-## 9. 独立 strict-online test 与 GT-free inference
-
-评测 checkpoint（checkpoint 内配置优先）：
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1 conda run --no-capture-output -n coop \
-  torchrun --standalone --nproc_per_node=2 \
-  -m opencood.tools.eval_colif_v2v4real \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --checkpoint /path/to/checkpoint_epoch_000.pth \
-  --split test --workers 2 --output /path/to/metrics_test.json
-```
-
-评测按完整 `(scene, receiver)` timeline 分配 rank，保持 online state；所有 numerator/count 在写 JSON 前跨卡 all-reduce。`--max-frames-per-rank` 只用于通路 smoke。
-
-GT-free inference：
-
-```bash
-CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n coop python \
-  -m opencood.tools.inference_colif_v2v4real \
-  --hypes_yaml opencood/hypes_yaml/colif/colif_v2v4real.yaml \
-  --checkpoint /path/to/checkpoint_epoch_000.pth \
-  --split test --output results/colif_online/test_runtime.pth
-```
-
-runtime dataset 递归拒绝 GT IDs、boxes、labels 与 future targets；`ass_id` 只进入 criterion/evaluator。
+报告必须同时包含1/3/5 s ADE、FDE、MR、coverage、matched actor frames及receiver-only/partner-only/shared分桶。Attention只用于解释不同intention读取了哪些表示，不能代替三组受控实验的因果证据。

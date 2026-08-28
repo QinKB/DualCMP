@@ -214,69 +214,6 @@ def _history_linear_predictions(
     )
 
 
-def _kinematic_lateral_mode_bank(
-    velocity: torch.Tensor,
-    heading: torch.Tensor,
-    future_times_s: torch.Tensor,
-    lateral_endpoint_m: float,
-) -> torch.Tensor:
-    """Build six causal motion hypotheses with symmetric lateral coverage."""
-
-    speed = torch.linalg.vector_norm(velocity)
-    heading_direction = torch.stack((torch.cos(heading), torch.sin(heading)))
-    direction = torch.where(
-        speed > 0.5,
-        velocity / speed.clamp_min(1e-6),
-        heading_direction,
-    )
-    perpendicular = torch.stack((-direction[1], direction[0]))
-    longitudinal = torch.stack(
-        [
-            future_times_s[:, None] * velocity[None] * scale
-            for scale in (0.0, 0.5, 1.0, 1.5, 1.0, 1.0)
-        ],
-        dim=0,
-    )
-    normalized_time = future_times_s / future_times_s[-1].clamp_min(1e-6)
-    lateral_profile = normalized_time.square()[:, None] * perpendicular[None]
-    longitudinal[4] = longitudinal[4] + float(lateral_endpoint_m) * lateral_profile
-    longitudinal[5] = longitudinal[5] - float(lateral_endpoint_m) * lateral_profile
-    return longitudinal
-
-
-def _residual_prototype_mode_bank(
-    velocity: torch.Tensor,
-    heading: torch.Tensor,
-    future_times_s: torch.Tensor,
-    prototypes_longitudinal_lateral_m: torch.Tensor,
-) -> torch.Tensor:
-    """Apply train-only local endpoint residual prototypes to causal CV."""
-
-    prototypes = prototypes_longitudinal_lateral_m.to(
-        device=velocity.device, dtype=velocity.dtype
-    )
-    if prototypes.ndim != 2 or prototypes.shape[1] != 2:
-        raise ValueError("residual prototypes must have shape [K,2]")
-    speed = torch.linalg.vector_norm(velocity)
-    heading_direction = torch.stack((torch.cos(heading), torch.sin(heading)))
-    direction = torch.where(
-        speed > 0.5,
-        velocity / speed.clamp_min(1e-6),
-        heading_direction,
-    )
-    perpendicular = torch.stack((-direction[1], direction[0]))
-    residual_receiver = (
-        prototypes[:, :1] * direction[None]
-        + prototypes[:, 1:] * perpendicular[None]
-    )
-    normalized_time = future_times_s / future_times_s[-1].clamp_min(1e-6)
-    return (
-        future_times_s[None, :, None] * velocity[None, None]
-        + normalized_time[None, :, None].square()
-        * residual_receiver[:, None]
-    )
-
-
 def evaluate_colif_strict_online(
     model,
     loader,
@@ -286,7 +223,6 @@ def evaluate_colif_strict_online(
     miss_thresholds=(2.0, 3.6),
     max_frames=None,
     progress_interval=100,
-    diagnostic_residual_prototypes=None,
     forecast_metric_protocol="online_masked",
 ):
     """Evaluate only after a supervision-free forward at every receiver time."""
@@ -316,11 +252,6 @@ def evaluate_colif_strict_online(
         "history_ols_line",
         "history_median_line",
         "stationary",
-        "history_multiscale_cv",
-        "history_lateral3_cv",
-        "history_lateral6_cv",
-        "history_lateral9_cv",
-        "history_residual_proto_cv",
     )
     support_bucket_names = ("receiver_only", "partner_only", "shared")
     diagnostic_fields_per_horizon = len(diagnostic_names) * 2 + 1
@@ -514,50 +445,6 @@ def evaluate_colif_strict_online(
                         2,
                         device=target_future.device,
                         dtype=target_future.dtype,
-                    ),
-                    torch.stack(
-                        [
-                            future_times[:, None]
-                            * history_median_velocity[None]
-                            * scale
-                            for scale in (0.0, 0.5, 0.75, 1.0, 1.25, 1.5)
-                        ],
-                        dim=0,
-                    ),
-                    _kinematic_lateral_mode_bank(
-                        history_median_velocity,
-                        outputs["track_boxes"][0, query_index, 6].float(),
-                        future_times,
-                        3.0,
-                    ),
-                    _kinematic_lateral_mode_bank(
-                        history_median_velocity,
-                        outputs["track_boxes"][0, query_index, 6].float(),
-                        future_times,
-                        6.0,
-                    ),
-                    _kinematic_lateral_mode_bank(
-                        history_median_velocity,
-                        outputs["track_boxes"][0, query_index, 6].float(),
-                        future_times,
-                        9.0,
-                    ),
-                    (
-                        _residual_prototype_mode_bank(
-                            history_median_velocity,
-                            outputs["track_boxes"][0, query_index, 6].float(),
-                            future_times,
-                            diagnostic_residual_prototypes,
-                        )
-                        if diagnostic_residual_prototypes is not None
-                        else torch.stack(
-                            [
-                                future_times[:, None]
-                                * history_median_velocity[None]
-                            ]
-                            * 6,
-                            dim=0,
-                        )
                     ),
                 )
                 for horizon_index, horizon in enumerate(horizons):

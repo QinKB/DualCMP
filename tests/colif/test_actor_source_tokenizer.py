@@ -3,6 +3,7 @@ import math
 import torch
 import pytest
 
+from opencood.loss.colif_loss import ColifLoss
 from opencood.models.colif.actor_source_tokenizer import (
     ActorAlignedSourceTokenizer,
 )
@@ -37,7 +38,6 @@ def test_tokenizer_preserves_source_and_spatial_dimensions() -> None:
 
     assert output["tokens"].shape == (1, 1, 2, 25, 8)
     assert output["positions"].shape == (1, 1, 2, 25, 8)
-    assert output["actor_positions"].shape == (1, 1, 8)
     assert output["token_mask"].shape == (1, 1, 2, 25)
     assert output["sampling_grid"].shape == (1, 1, 25, 2)
 
@@ -70,7 +70,6 @@ def test_inactive_actor_has_zero_tokens_and_mask() -> None:
 
     assert torch.count_nonzero(output["tokens"]) == 0
     assert torch.count_nonzero(output["positions"]) == 0
-    assert torch.count_nonzero(output["actor_positions"]) == 0
     assert not output["token_mask"].any()
 
 
@@ -108,20 +107,28 @@ def test_source_permutation_only_permutes_source_tokens() -> None:
     )
 
 
-def test_position_input_preserves_metric_extent_and_absolute_location() -> None:
+def test_position_input_preserves_metric_extent_in_mtr_local_frame() -> None:
     module = _module()
     small = _boxes()
     large = _boxes()
     large[..., 5] = 8.0
-    shifted = _boxes()
-    shifted[..., 0] = 4.0
-
     _, _, small_position = module._sampling_grid(small)
     _, _, large_position = module._sampling_grid(large)
-    _, _, shifted_position = module._sampling_grid(shifted)
 
     assert large_position[..., 0].abs().max() > small_position[..., 0].abs().max()
-    assert not torch.allclose(small_position[..., 2:], shifted_position[..., 2:])
+
+
+def test_position_input_matches_mtr_legacy_local_frame_at_nonzero_yaw() -> None:
+    module = _module()
+    boxes = _boxes(yaw=math.pi / 2.0)
+    grid, _, encoded_local = module._sampling_grid(boxes)
+    receiver_offset = grid * 8.0
+    expected = ColifLoss._receiver_displacement_to_actor(
+        receiver_offset,
+        boxes[..., 6, None],
+    ) / 8.0
+
+    torch.testing.assert_close(encoded_local, expected, atol=1e-6, rtol=1e-6)
 
 
 def test_invalid_tokenizer_configuration_is_rejected() -> None:

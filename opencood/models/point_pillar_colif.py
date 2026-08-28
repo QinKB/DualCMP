@@ -17,9 +17,8 @@ from opencood.models.colif import (
     FutureAdapter,
     GlobalForecastState,
     MeasurementStateUpdate,
-    MotionAnchoredForecastHead,
+    IntentionQueryForecastHead,
     PersistentQueryDecoder,
-    PersistentQueryMTRAdapter,
     TemporalQueryMemory,
 )
 from opencood.models.colif.lifecycle import QueryLifecycle
@@ -29,37 +28,36 @@ from opencood.models.colif.query_geometry import (
 )
 
 
-FORECAST_BEV_REPRESENTATIONS = ("per_cav", "fused")
+FORECAST_BEV_REPRESENTATIONS = ("dual", "fused", "source")
 
 
-def select_forecast_bev_sources(
+def select_forecast_bev_inputs(
     representation: str,
     encoded: dict,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Select spatial evidence only for the forecast reader.
+) -> dict:
+    """Select consensus and source-preserved forecast representations.
 
-    Tracking always consumes ``encoded['fused_bev']`` before this selection.
-    The fused ablation therefore changes forecast evidence without changing
-    measurements, query identities, or histories.
+    Tracking always consumes ``encoded['fused_bev']``.  These switches only
+    control which actor evidence the intention queries may read.
     """
 
     representation = str(representation)
-    if representation == "per_cav":
-        return (
-            encoded["regrouped_source_bev"],
-            encoded["cav_mask"].bool(),
+    if representation not in FORECAST_BEV_REPRESENTATIONS:
+        raise ValueError(
+            "actor_cooperative_fusion.representation must be one of %s"
+            % (FORECAST_BEV_REPRESENTATIONS,)
         )
-    if representation == "fused":
-        fused_bev = encoded["fused_bev"]
-        batch = fused_bev.shape[0]
-        cav_mask = torch.ones(
-            batch, 1, dtype=torch.bool, device=fused_bev.device
-        )
-        return fused_bev.unsqueeze(1), cav_mask
-    raise ValueError(
-        "actor_cooperative_fusion.representation must be one of %s"
-        % (FORECAST_BEV_REPRESENTATIONS,)
-    )
+    fused_bev = encoded["fused_bev"]
+    batch = fused_bev.shape[0]
+    consensus = (
+        fused_bev.unsqueeze(1),
+        torch.ones(batch, 1, dtype=torch.bool, device=fused_bev.device),
+    ) if representation in ("dual", "fused") else (None, None)
+    source = (
+        encoded["regrouped_source_bev"],
+        encoded["cav_mask"].bool(),
+    ) if representation in ("dual", "source") else (None, None)
+    return {"consensus": consensus, "source": source}
 
 
 class PointPillarColif(nn.Module):
@@ -96,10 +94,8 @@ class PointPillarColif(nn.Module):
             cooperative_args.get("enabled", True)
         )
         self.forecast_bev_representation = str(
-            cooperative_args.get("representation", "per_cav")
+            cooperative_args.get("representation", "dual")
         )
-        self.source_aggregation = "mode_attention"
-        self.source_geometry_conditioning = False
         if self.forecast_bev_representation not in FORECAST_BEV_REPRESENTATIONS:
             raise ValueError(
                 "actor_cooperative_fusion.representation must be one of %s"
@@ -166,20 +162,16 @@ class PointPillarColif(nn.Module):
         forecast_args = dict(args.get("forecast", {}))
         forecast_args.setdefault("lidar_range", args["lidar_range"])
         forecast_architecture = str(
-            forecast_args.get("architecture", "cmp_mtr")
+            forecast_args.get("architecture", "intention_query")
         )
-        if forecast_architecture == "cmp_mtr":
-            self.forecast_head = PersistentQueryMTRAdapter(
-                self.query_dim, forecast_args
-            )
-        elif forecast_architecture == "motion_anchored":
-            self.forecast_head = MotionAnchoredForecastHead(
-                self.query_dim, forecast_args
-            )
-        else:
+        if forecast_architecture != "intention_query":
             raise ValueError(
-                "Unknown forecast.architecture: %s" % forecast_architecture
+                "forecast.architecture must be intention_query, got %s"
+                % forecast_architecture
             )
+        self.forecast_head = IntentionQueryForecastHead(
+            self.query_dim, forecast_args
+        )
         prior_args = args.get("forecast_motion_prior", {})
         self.phase2_future_prior_mode = str(
             prior_args.get("phase2_mode", prior_args.get("mode", "none"))
@@ -627,10 +619,7 @@ class PointPillarColif(nn.Module):
     ):
         encoded = self.cobevt.encode_fused_bev(runtime_frame)
         fused_bev = encoded["fused_bev"]
-        (
-            forecast_source_bev,
-            forecast_cav_mask,
-        ) = select_forecast_bev_sources(
+        forecast_inputs = select_forecast_bev_inputs(
             self.forecast_bev_representation,
             encoded,
         )
@@ -724,18 +713,22 @@ class PointPillarColif(nn.Module):
         )
         if run_forecast and self.forecast_head.enabled:
             if self.actor_cooperative_fusion_enabled:
-                source_evidence = self.actor_source_tokenizer(
-                    forecast_source_bev,
-                    forecast_cav_mask,
-                    next_state.ref_box,
-                    next_state.active_mask,
-                )
+                evidence = {}
+                for name, (bev, mask) in forecast_inputs.items():
+                    evidence[name] = (
+                        self.actor_source_tokenizer(
+                            bev,
+                            mask,
+                            next_state.ref_box,
+                            next_state.active_mask,
+                        )
+                        if bev is not None
+                        else {"tokens": None, "positions": None, "token_mask": None}
+                    )
             else:
-                source_evidence = {
-                    "tokens": None,
-                    "positions": None,
-                    "actor_positions": None,
-                    "token_mask": None,
+                evidence = {
+                    name: {"tokens": None, "positions": None, "token_mask": None}
+                    for name in ("consensus", "source")
                 }
             forecast = self.forecast_head(
                 next_state.query_feat,
@@ -744,12 +737,12 @@ class PointPillarColif(nn.Module):
                 next_state.forecast_history_box,
                 next_state.history_mask,
                 next_state.receiver_time_s,
-                source_tokens=source_evidence["tokens"],
-                source_positions=source_evidence["positions"],
-                source_actor_positions=source_evidence[
-                    "actor_positions"
-                ],
-                source_token_mask=source_evidence["token_mask"],
+                consensus_tokens=evidence["consensus"]["tokens"],
+                consensus_positions=evidence["consensus"]["positions"],
+                consensus_token_mask=evidence["consensus"]["token_mask"],
+                source_tokens=evidence["source"]["tokens"],
+                source_positions=evidence["source"]["positions"],
+                source_token_mask=evidence["source"]["token_mask"],
             )
             cooperative = {
                 "context": forecast["cooperative_context"],
@@ -763,8 +756,8 @@ class PointPillarColif(nn.Module):
                 "attention_weights": next_state.query_feat.new_zeros(
                     next_state.query_feat.shape[0],
                     next_state.query_feat.shape[1],
-                    forecast_cav_mask.shape[1],
-                    self.actor_source_tokenizer.tokens_per_source,
+                    0,
+                    0,
                 ),
             }
             forecast = self.forecast_head.empty_outputs(
@@ -858,8 +851,15 @@ class PointPillarColif(nn.Module):
             "cooperative_attention_weights": cooperative[
                 "attention_weights"
             ],
-            "actor_source_attention_weights": forecast[
-                "actor_source_attention_weights"
+            "consensus_attention_weights": forecast[
+                "consensus_attention_weights"
+            ],
+            "source_attention_weights": forecast["source_attention_weights"],
+            "mode_consensus_attention_weights": forecast[
+                "mode_consensus_attention_weights"
+            ],
+            "mode_source_attention_weights": forecast[
+                "mode_source_attention_weights"
             ],
             "auxiliary_psm": auxiliary_psm,
             "auxiliary_rm": auxiliary_rm,
@@ -872,11 +872,14 @@ class PointPillarColif(nn.Module):
             "source_bev": encoded["source_bev"],
             "regrouped_source_bev": encoded["regrouped_source_bev"],
             "actor_cooperative_context": cooperative["context"],
+            "consensus_actor_context": forecast["consensus_context"],
+            "source_actor_context": forecast["source_context"],
             "actor_cooperative_attention_weights": cooperative[
                 "attention_weights"
             ],
             "cav_mask": encoded["cav_mask"],
-            "forecast_cav_mask": forecast_cav_mask,
+            "forecast_consensus_mask": forecast_inputs["consensus"][1],
+            "forecast_source_mask": forecast_inputs["source"][1],
             "cv_propagated_box": cv_propagated_box,
             "propagated_box": spatial_prior.predicted_box,
             "propagated_velocity": spatial_prior.predicted_velocity,

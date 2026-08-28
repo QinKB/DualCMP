@@ -62,7 +62,7 @@ class ColifLoss(nn.Module):
     def _receiver_displacement_to_actor(displacement, heading):
         """Match CMP/MTR's center-actor heading-normalized target frame."""
 
-        # See PersistentQueryMTRAdapter: CMP's released V2V4Real MTR consumes
+        # CMP's released V2V4Real MTR consumes
         # numeric degree headings as trigonometric angles.  This compatibility
         # conversion is deliberately local; tracking/state geometry remains
         # in radians.

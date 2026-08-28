@@ -81,59 +81,9 @@ def _arguments():
         ),
     )
     parser.add_argument("--diagnostic-min-forecast-history", type=int)
-    parser.add_argument("--diagnostic-min-context-history", type=int)
-    parser.add_argument("--diagnostic-heading-smoothing-steps", type=int)
     parser.add_argument("--diagnostic-disable-actor-cooperative-fusion", action="store_true")
     parser.add_argument("--diagnostic-disable-temporal-history", action="store_true")
-    parser.add_argument(
-        "--diagnostic-forecast-layer",
-        choices=("checkpoint", "refined", "proposal"),
-        default="checkpoint",
-        help=(
-            "Diagnostic-only output-layer override. By default, preserve the "
-            "inference layer stored in the checkpoint configuration."
-        ),
-    )
-    parser.add_argument(
-        "--diagnostic-residual-prototypes",
-        help="Train-only JSON produced by audit_motion_prototypes",
-    )
     return parser.parse_args()
-
-
-def _apply_forecast_layer_override(forecast_head, requested_layer: str) -> dict:
-    """Apply an explicit diagnostic override without changing the default model."""
-
-    has_layer = hasattr(forecast_head, "inference_layer")
-    checkpoint_layer = (
-        str(forecast_head.inference_layer) if has_layer else "refined"
-    )
-    overridden = requested_layer != "checkpoint"
-    if overridden:
-        available = tuple(
-            getattr(
-                forecast_head,
-                "available_inference_layers",
-                ("proposal", "refined") if has_layer else ("refined",),
-            )
-        )
-        if requested_layer not in available:
-            raise ValueError(
-                "forecast layer %s is unavailable; available=%s"
-                % (requested_layer, available)
-            )
-        if not has_layer and requested_layer != "refined":
-            raise ValueError("checkpoint forecast head has no proposal layer")
-        if has_layer:
-            forecast_head.inference_layer = requested_layer
-    effective_layer = (
-        str(forecast_head.inference_layer) if has_layer else "refined"
-    )
-    return {
-        "checkpoint_inference_layer": checkpoint_layer,
-        "effective_inference_layer": effective_layer,
-        "diagnostic_forecast_layer_override": overridden,
-    }
 
 
 def main():
@@ -157,14 +107,6 @@ def main():
         forecast_config["min_forecast_history_steps"] = int(
             args.diagnostic_min_forecast_history
         )
-    if args.diagnostic_min_context_history is not None:
-        forecast_config["min_context_history_steps"] = int(
-            args.diagnostic_min_context_history
-        )
-    if args.diagnostic_heading_smoothing_steps is not None:
-        forecast_config["heading_smoothing_steps"] = int(
-            args.diagnostic_heading_smoothing_steps
-        )
     _, loader = build_colif_evaluation_loader(
         hypes, split=args.split, rank=rank, world_size=world_size,
         workers=args.workers,
@@ -177,9 +119,6 @@ def main():
         if not hasattr(model.forecast_head, "temporal_history_enabled"):
             raise ValueError("checkpoint forecast head has no temporal-history branch")
         model.forecast_head.temporal_history_enabled = False
-    forecast_layer_report = _apply_forecast_layer_override(
-        model.forecast_head, args.diagnostic_forecast_layer
-    )
     mtr_reload_report = None
     if args.diagnostic_reload_mtr_checkpoint:
         model.forecast_head.enabled = True
@@ -196,20 +135,6 @@ def main():
         model.future_adapter.mode = "none"
     if args.future_prior_mode != "checkpoint":
         model.forecast_motion_prior.mode = args.future_prior_mode
-    diagnostic_residual_prototypes = None
-    if args.diagnostic_residual_prototypes:
-        prototype_payload = json.loads(
-            Path(args.diagnostic_residual_prototypes).read_text(
-                encoding="utf-8"
-            )
-        )
-        if prototype_payload.get("split") != "train":
-            raise ValueError("Residual prototypes must be fitted on train")
-        diagnostic_residual_prototypes = torch.as_tensor(
-            prototype_payload["centers_longitudinal_lateral_m"],
-            dtype=torch.float32,
-            device=device,
-        )
     metrics = evaluate_colif_strict_online(
         model,
         loader,
@@ -220,7 +145,6 @@ def main():
             )
         ),
         max_frames=args.max_frames_per_rank,
-        diagnostic_residual_prototypes=diagnostic_residual_prototypes,
         forecast_metric_protocol=args.forecast_metric_protocol,
     )
     metrics.update({
@@ -231,19 +155,10 @@ def main():
         "forecast_bev_representation": getattr(
             model, "forecast_bev_representation", "per_cav"
         ),
-        "source_aggregation": getattr(
-            model, "source_aggregation", "attention"
-        ),
-        "source_geometry": (
-            "on"
-            if getattr(model, "source_geometry_conditioning", False)
-            else "off"
-        ),
-        "trajectory_parameterization": getattr(
-            model.forecast_head,
-            "trajectory_parameterization",
-            None,
-        ),
+        "forecast_architecture": "intention_query",
+        "raw_intention_modes": model.forecast_head.raw_modes,
+        "output_modes": model.forecast_head.modes,
+        "decoder_layers": model.forecast_head.decoder_layers,
         "world_size": world_size,
         "receiver_ids": list(receiver_ids),
         "max_frames_per_rank": args.max_frames_per_rank,
@@ -264,27 +179,11 @@ def main():
         "diagnostic_min_forecast_history": (
             args.diagnostic_min_forecast_history
         ),
-        "diagnostic_min_context_history": (
-            args.diagnostic_min_context_history
-        ),
-        "diagnostic_heading_smoothing_steps": (
-            args.diagnostic_heading_smoothing_steps
-        ),
         "diagnostic_actor_cooperative_fusion_disabled": bool(
             args.diagnostic_disable_actor_cooperative_fusion
         ),
         "diagnostic_temporal_history_disabled": bool(
             args.diagnostic_disable_temporal_history
-        ),
-        "diagnostic_forecast_layer": (
-            None
-            if args.diagnostic_forecast_layer == "checkpoint"
-            else args.diagnostic_forecast_layer
-        ),
-        **forecast_layer_report,
-        "diagnostic_residual_prototypes": (
-            str(Path(args.diagnostic_residual_prototypes).resolve())
-            if args.diagnostic_residual_prototypes else None
         ),
     })
     if rank == 0:

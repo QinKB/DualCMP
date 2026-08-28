@@ -6,46 +6,10 @@ import torch
 from opencood.tools.colif.eval_utils import (
     _history_linear_predictions,
     _history_velocity_estimates,
-    _kinematic_lateral_mode_bank,
-    _residual_prototype_mode_bank,
     SceneReceiverDistributedSampler,
     _absolute_forecast_error,
     evaluate_colif_strict_online,
 )
-
-
-def test_kinematic_lateral_mode_bank_adds_symmetric_turn_hypotheses():
-    times = torch.linspace(0.1, 5.0, 50)
-    bank = _kinematic_lateral_mode_bank(
-        torch.tensor([2.0, 0.0]),
-        heading=torch.tensor(0.0),
-        future_times_s=times,
-        lateral_endpoint_m=6.0,
-    )
-
-    assert bank.shape == (6, 50, 2)
-    torch.testing.assert_close(bank[0], torch.zeros_like(bank[0]))
-    torch.testing.assert_close(bank[4, -1], torch.tensor([10.0, 6.0]))
-    torch.testing.assert_close(bank[5, -1], torch.tensor([10.0, -6.0]))
-    # The lateral component grows smoothly from the current state rather than
-    # applying an instantaneous endpoint offset.
-    assert 0.0 < float(bank[4, 0, 1]) < 6.0
-
-
-def test_residual_prototype_bank_rotates_local_endpoints_into_receiver_axes():
-    times = torch.linspace(0.1, 5.0, 50)
-    prototypes = torch.tensor([[2.0, 3.0], [-4.0, -1.0]])
-    bank = _residual_prototype_mode_bank(
-        torch.tensor([0.0, 2.0]),
-        heading=torch.tensor(0.0),
-        future_times_s=times,
-        prototypes_longitudinal_lateral_m=prototypes,
-    )
-
-    assert bank.shape == (2, 50, 2)
-    # Motion direction is +y, so its left-hand perpendicular is -x.
-    torch.testing.assert_close(bank[0, -1], torch.tensor([-3.0, 12.0]))
-    torch.testing.assert_close(bank[1, -1], torch.tensor([1.0, 6.0]))
 
 
 def test_forecast_error_includes_current_tracking_localization_error():
