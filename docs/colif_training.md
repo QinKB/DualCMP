@@ -68,9 +68,9 @@ PYTHONPATH=/home/qkb/Project/CoLIF CUDA_VISIBLE_DEVICES=0,1 \
   --init-colif-checkpoint \
   /home/qkb/Project/CoLIF/opencood/logs/colif_paper_phase1_20e_seed20/checkpoint_epoch_009.pth \
   --output-dir /home/qkb/Project/CoLIF/opencood/logs/train-dual-s20 \
-  --epochs 20 --batch-size 1 --grad-accum-steps 4 --workers 2 --lr 0.0005 \
+  --epochs 30 --batch-size 1 --grad-accum-steps 4 --workers 4 --lr 0.0005 \
   --receiver-ids 0,1 --forecast-bev-representation dual --seed 20 \
-  --no-eval --log-every 50
+  --no-eval --log-every 100
 ```
 
 Phase-1 checkpoint只恢复检测与跟踪；forecast branch保留当前seed对应的随机初始化。训练入口不提供MTR checkpoint加载参数，避免误用预训练预测权重。
