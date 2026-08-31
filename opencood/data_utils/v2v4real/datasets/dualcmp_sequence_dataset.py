@@ -113,6 +113,27 @@ class DualCMPSequenceDataset(Dataset):
                 first_start = 0 if self.stage == "detection" else 1
                 for start in range(first_start, frame_count - self.clip_length + 1, self.clip_stride):
                     self.clip_records.append(ClipRecord(scene_id, receiver_id, start))
+        window_entries = args.get("window")
+        if window_entries is not None:
+            if not isinstance(window_entries, list) or not window_entries:
+                raise ValueError("DualCMP window must be a non-empty list")
+            allowed = set()
+            for entry in window_entries:
+                if not isinstance(entry, dict) or set(entry) != {"scene_id", "receiver_id", "start_frame", "end_frame"}:
+                    raise ValueError("DualCMP window entries require scene_id, receiver_id, start_frame, end_frame")
+                start_frame, end_frame = int(entry["start_frame"]), int(entry["end_frame"])
+                if end_frame < start_frame:
+                    raise ValueError("DualCMP window end_frame must be >= start_frame")
+                allowed.add((str(entry["scene_id"]), str(entry["receiver_id"]), start_frame, end_frame))
+            self.clip_records = [
+                record for record in self.clip_records
+                if any(
+                    record.scene_id == scene_id and record.receiver_id == receiver_id
+                    and start_frame <= int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position])
+                    and int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position + self.clip_length - 1]) <= end_frame
+                    for scene_id, receiver_id, start_frame, end_frame in allowed
+                )
+            ]
         if not self.clip_records:
             raise ValueError("No causal %s clips with sufficient receiver history" % self.stage)
 

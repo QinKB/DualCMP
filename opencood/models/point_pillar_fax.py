@@ -75,7 +75,6 @@ class PointPillarFax(nn.Module):
         voxel_coords = data_dict['processed_lidar']['voxel_coords']
         voxel_num_points = data_dict['processed_lidar']['voxel_num_points']
         record_len = data_dict['record_len']
-        spatial_correction_matrix = data_dict['spatial_correction_matrix']
 
         batch_dict = {'voxel_features': voxel_features,
                       'voxel_coords': voxel_coords,
@@ -111,6 +110,9 @@ class PointPillarFax(nn.Module):
         rm = self.reg_head(fused_feature)
 
         output_dict = {'psm': psm,
-                       'rm': rm}
+                       'rm': rm,
+                       'source_bev': regroup_feature,
+                       'source_mask': mask.bool(),
+                       'fused_bev': fused_feature}
 
         return output_dict
