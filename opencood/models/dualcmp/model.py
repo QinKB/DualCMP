@@ -34,6 +34,11 @@ class DualCmpClipModel(nn.Module):
         self.track_box = nn.Linear(feature_dim, 7)
         self.track_velocity = nn.Linear(feature_dim, 2)
 
+    @staticmethod
+    def emission_mask(valid_mask, quality, threshold):
+        """AB3DMOT-style max-age validity plus learned quality threshold."""
+        return valid_mask & (quality >= float(threshold))
+
     def forward(self, runtime_frames, state=None, max_dt_s=0.2,
                 detector_autocast=False):
         """Advance only from runtime frames; actor state remains FP32.
@@ -82,7 +87,9 @@ class DualCmpClipModel(nn.Module):
                 velocity=torch.where(valid[..., None], detector["track_velocity"], state.velocity),
                 quality=torch.where(valid, quality, state.quality),
                 score=torch.where(valid, quality, state.score),
-                active_mask=state.active_mask & (quality >= self.emission_threshold),
+                # AB3DMOT output keeps valid tracks through max_age; an
+                # unmatched frame must not suppress a quality-qualified actor.
+                active_mask=self.emission_mask(valid, quality, self.emission_threshold),
                 history_box=torch.where(
                     valid[..., None, None],
                     torch.cat((detector["track_box"].unsqueeze(2), state.history_box[:, :, :-1]), dim=2),

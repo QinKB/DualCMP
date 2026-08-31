@@ -26,23 +26,20 @@ def decode_proposals(psm, rm, anchors, top_k, *, training,
     count = min(int(top_k), scores.shape[1])
     scores, indices = scores.topk(count, dim=1)
     boxes = boxes.gather(1, indices[..., None].expand(-1, -1, 7))
-    if training:
-        # Fixed-width training candidates preserve supervision coverage.
-        keep = torch.ones_like(scores, dtype=torch.bool)
-    else:
-        keep = scores >= float(score_threshold)
-        # NMS has no batch interface; retain indices in each row's fixed
-        # top-K layout so ActorTracker sees an ordinary [B,K] mask.
-        for row in range(boxes.shape[0]):
-            candidate = torch.nonzero(keep[row], as_tuple=False).flatten()
-            if candidate.numel() == 0:
-                continue
-            corners = box_utils_v2v4real.boxes_to_corners_3d(
-                boxes[row, candidate], order="hwl")
-            selected = box_utils_v2v4real.nms_rotated(
-                corners, scores[row, candidate], float(nms_thresh))
-            row_keep = torch.zeros_like(keep[row])
-            if len(selected):
-                row_keep[candidate[torch.as_tensor(selected, device=candidate.device)]] = True
-            keep[row] = row_keep
+    del training
+    keep = scores >= float(score_threshold)
+    # NMS has no batch interface; retain indices in each row's fixed top-K
+    # layout so training and inference propagate identical candidates.
+    for row in range(boxes.shape[0]):
+        candidate = torch.nonzero(keep[row], as_tuple=False).flatten()
+        if candidate.numel() == 0:
+            continue
+        corners = box_utils_v2v4real.boxes_to_corners_3d(
+            boxes[row, candidate], order="hwl")
+        selected = box_utils_v2v4real.nms_rotated(
+            corners, scores[row, candidate], float(nms_thresh))
+        row_keep = torch.zeros_like(keep[row])
+        if len(selected):
+            row_keep[candidate[torch.as_tensor(selected, device=candidate.device)]] = True
+        keep[row] = row_keep
     return {"boxes": boxes, "scores": scores, "mask": keep}

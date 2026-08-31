@@ -9,6 +9,9 @@ import torch
 
 from opencood.models.dualcmp.geometry import previous_to_current, propagate_state, wrap_angle
 from opencood.models.dualcmp.state import ActorState
+from opencood.models.dualcmp.tracker import ActorTracker
+from opencood.models.dualcmp.model import DualCmpClipModel
+from opencood.models.dualcmp.proposal import decode_proposals
 
 
 def _pose(x=0.0, y=0.0, yaw=0.0, dtype=torch.float32):
@@ -215,3 +218,49 @@ def test_propagation_preserves_or_cuts_autograd_as_requested():
 
 def test_angle_wrap_is_principal_interval():
     torch.testing.assert_close(wrap_angle(torch.tensor([3 * torch.pi])), torch.tensor([-torch.pi]), atol=1e-6, rtol=0)
+
+
+def test_tracker_hungarian_uses_available_second_proposal_not_a_false_miss():
+    state = _state(max_actors=2)
+    state = replace(state, box=torch.tensor([[[0.0, 0.0, 0.0, 1, 1, 2, 0],
+                                               [1.0, 0.0, 0.0, 1, 1, 2, 0]]]),
+                    velocity=torch.zeros_like(state.velocity))
+    proposals = {"boxes": torch.tensor([[[0.4, 0.0, 0.0, 1, 1, 2, 0],
+                                          [-2.0, 0.0, 0.0, 1, 1, 2, 0]]]),
+                 "scores": torch.tensor([[0.9, 0.8]]), "mask": torch.tensor([[True, True]])}
+    result = ActorTracker(max_miss=2)(state, proposals, _pose().unsqueeze(0), torch.tensor([0.1]), 1.0)
+    assert result.miss_count.tolist() == [[0, 0]]
+    assert result.active_mask.tolist() == [[True, True]]
+
+
+def test_tracker_keeps_two_misses_and_deletes_the_third():
+    state = _state()
+    proposals = {"boxes": torch.zeros(1, 0, 7), "scores": torch.zeros(1, 0),
+                 "mask": torch.zeros(1, 0, dtype=torch.bool)}
+    tracker = ActorTracker(max_miss=2)
+    for time_s, expected_valid in ((0.1, True), (0.2, True), (0.3, False)):
+        state = tracker(state, proposals, _pose().unsqueeze(0), torch.tensor([time_s]), 1.0)
+        assert bool(state.valid_mask[0, 0]) is expected_valid
+
+
+def test_quality_emission_preserves_max_age_valid_misses():
+    state = _state()
+    proposals = {"boxes": torch.zeros(1, 0, 7), "scores": torch.zeros(1, 0),
+                 "mask": torch.zeros(1, 0, dtype=torch.bool)}
+    tracker = ActorTracker(max_miss=2)
+    for time_s in (0.1, 0.2):
+        state = tracker(state, proposals, _pose().unsqueeze(0), torch.tensor([time_s]), 1.0)
+        assert DualCmpClipModel.emission_mask(state.valid_mask, torch.tensor([[0.8]]), 0.2).tolist() == [[True]]
+    state = tracker(state, proposals, _pose().unsqueeze(0), torch.tensor([0.3]), 1.0)
+    assert not DualCmpClipModel.emission_mask(state.valid_mask, torch.tensor([[0.8]]), 0.2).any()
+
+
+def test_proposal_candidate_mask_is_identical_for_train_and_eval():
+    anchors = torch.tensor([[[[0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0]],
+                             [[10.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0]]]])
+    psm = torch.tensor([[[[3.0, -3.0]]]])
+    rm = torch.zeros(1, 7, 1, 2)
+    train = decode_proposals(psm, rm, anchors, 2, training=True, score_threshold=0.2, nms_thresh=0.15)
+    evaluation = decode_proposals(psm, rm, anchors, 2, training=False, score_threshold=0.2, nms_thresh=0.15)
+    assert torch.equal(train["mask"], evaluation["mask"])
+    assert train["mask"].tolist() == [[True, False]]

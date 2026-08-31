@@ -13,11 +13,11 @@ TRACKING_FRAMES = 3
 DETECTOR_COMPRESSION = 32
 CLIPS_PER_RECEIVER = WINDOW_FRAMES - TRACKING_FRAMES + 1
 TOTAL_CLIPS = CLIPS_PER_RECEIVER * len(WINDOW)
-AUDIT_DENOMINATORS = {"states": 794, "first_frame_states": 33,
-                      "birth": 29, "keep": 732, "delete": 22,
+AUDIT_DENOMINATORS = {"states": 948, "first_frame_states": 38,
+                      "birth": 35, "keep": 875, "delete": 26,
                       "duplicate": 948}
-AUDIT_THRESHOLDS = {"birth_tp": 24, "keep_same_runtime": 696,
-                    "delete_tp": 17, "duplicate_max": 9, "iou": 0.25}
+AUDIT_THRESHOLDS = {"birth_tp": 29, "keep_same_runtime": 832,
+                    "delete_tp": 21, "duplicate_max": 9, "iou": 0.25}
 METRIC_THRESHOLDS = {"sAMOTA": 0.70, "AMOTA": 0.70, "MOTA": 0.70,
                      "tracking_recall": 0.80, "tracking_precision": 0.80,
                      "identity_switches_max": 8}

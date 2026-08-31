@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import torch
+from scipy.optimize import linear_sum_assignment
 
 from .geometry import propagate_state
 
@@ -29,16 +30,28 @@ class ActorTracker(torch.nn.Module):
                 continue
             candidate = torch.nonzero(proposals["mask"][batch_index], as_tuple=False).flatten()
             assigned = set()
-            # Existing actors first: each actor consumes nearest unused proposal.
-            for slot in torch.nonzero(valid[batch_index], as_tuple=False).flatten().tolist():
-                if candidate.numel():
-                    distances = torch.linalg.vector_norm(proposals["boxes"][batch_index, candidate, :2] - box[batch_index, slot, :2], dim=1)
-                    best = int(torch.argmin(distances))
-                    proposal_index = int(candidate[best])
-                    if distances[best] <= self.match_distance and proposal_index not in assigned:
-                        box[batch_index, slot] = proposals["boxes"][batch_index, proposal_index]
-                        score[batch_index, slot] = proposals["scores"][batch_index, proposal_index]
-                        miss[batch_index, slot] = 0; age[batch_index, slot] += 1; active[batch_index, slot] = True; last_update[batch_index, slot] = current_time_s[batch_index]; assigned.add(proposal_index); continue
+            slots = torch.nonzero(valid[batch_index], as_tuple=False).flatten().tolist()
+            matched = {}
+            if slots and candidate.numel():
+                # AB3DMOT ``matching.data_association(..., algm='hungar')``
+                # supplies the one-to-one solver, but its Box3D/GIoU affinity
+                # interface cannot consume this tensor-only existing 4m center
+                # gate.  Reuse the project-standard SciPy Hungarian backend
+                # while preserving that pre-existing cost exactly.
+                distances = torch.linalg.vector_norm(
+                    box[batch_index, slots, None, :2] -
+                    proposals["boxes"][batch_index, candidate][None, :, :2], dim=-1)
+                rows, columns = linear_sum_assignment(distances.detach().cpu().numpy())
+                for row, column in zip(rows.tolist(), columns.tolist()):
+                    if distances[row, column] <= self.match_distance:
+                        matched[slots[row]] = int(candidate[column])
+            # Existing actors first: one global center-distance assignment.
+            for slot in slots:
+                proposal_index = matched.get(slot)
+                if proposal_index is not None:
+                    box[batch_index, slot] = proposals["boxes"][batch_index, proposal_index]
+                    score[batch_index, slot] = proposals["scores"][batch_index, proposal_index]
+                    miss[batch_index, slot] = 0; age[batch_index, slot] += 1; active[batch_index, slot] = True; last_update[batch_index, slot] = current_time_s[batch_index]; assigned.add(proposal_index); continue
                 miss[batch_index, slot] += 1
                 if miss[batch_index, slot] > self.max_miss:
                     valid[batch_index, slot] = False; runtime_id[batch_index, slot] = -1; last_update[batch_index, slot] = float("nan")

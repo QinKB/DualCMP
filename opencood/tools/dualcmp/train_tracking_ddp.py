@@ -38,8 +38,9 @@ def _init_distributed():
 def _hypes(path):
     root = os.environ.get("V2V4REAL_ROOT")
     weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
-    if not root or not weights:
-        raise EnvironmentError("V2V4REAL_ROOT and DUALCMP_DETECTOR_WEIGHTS are required")
+    label_root = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
+    if not root or not weights or not label_root:
+        raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_DETECTOR_WEIGHTS, and DUALCMP_TRACKING_LABEL_ROOT are required")
     hypes = load_yaml(path)
     hypes["root_dir"] = str(Path(root) / "test")
     hypes["validate_dir"] = hypes["root_dir"]
@@ -47,7 +48,7 @@ def _hypes(path):
     hypes["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
         "stage": "tracking", "tracking_frames": 3, "runtime_only": False,
         "runtime_forbid_gt": True, "receiver_ids": [0, 1], "frame_period_s": 0.1,
-        "max_actors": 128, "max_cav": 2, "window": list(WINDOW),
+        "max_actors": 128, "max_cav": 2, "window": list(WINDOW), "tracking_label_root": label_root,
         "shuffle_training_points": False,
     }}
     return hypes, weights

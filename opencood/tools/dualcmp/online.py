@@ -15,6 +15,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 
 from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_dataset import DualCMPSequenceDataset
+from opencood.data_utils.v2v4real.datasets.dualcmp_target_builder import load_tracking_label_file, transform_tracking_boxes
 from opencood.data_utils.v2v4real.post_processor import build_postprocessor
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.models.dualcmp.model import DualCmpClipModel
@@ -125,6 +126,16 @@ def _prediction_boxes(frame, box_class):
             for runtime_id, box in zip(frame["runtime_ids"], frame["boxes"])}
 
 
+def _prediction_in_reference(frame, receiver_pose, reference_pose):
+    """Convert emitted receiver-local boxes only at the metric boundary."""
+    boxes = frame["boxes"]
+    if boxes:
+        boxes = transform_tracking_boxes(np.asarray(boxes, dtype=np.float32),
+                                         receiver_pose, reference_pose).tolist()
+    return {"frame_index": frame["frame_index"], "runtime_ids": frame["runtime_ids"],
+            "boxes": boxes, "scores": frame["scores"]}
+
+
 def _match_frame(predictions, targets, iou_fn):
     pred_ids, gt_ids = list(predictions), list(targets)
     matches, overlaps = {}, {}
@@ -149,11 +160,9 @@ def _match_frame(predictions, targets, iou_fn):
 
 
 def _gt_conditioned_audit(repository_root, predictions):
-    """Audit emitted runtime IDs against frozen-window GT; not a metric replacement."""
+    """Count evaluator-GT duplicate matches; lifecycle is label-target-only."""
     box_class, iou_fn = _ab3d_geometry(repository_root)
-    totals = {"birth_tp": 0, "birth_denominator": 0, "keep_tp": 0,
-              "keep_denominator": 0, "delete_tp": 0, "delete_denominator": 0,
-              "duplicate": 0, "duplicate_denominator": 0}
+    totals = {"duplicate": 0, "duplicate_denominator": 0}
     for entry in WINDOW:
         timeline = (entry["scene_id"], entry["receiver_id"])
         frames = predictions[timeline]
@@ -161,56 +170,35 @@ def _gt_conditioned_audit(repository_root, predictions):
         if [int(frame["frame_index"]) for frame in frames] != raw:
             raise ValueError("evaluation predictions do not exactly match frozen receiver window")
         gt = _window_ground_truth(repository_root, entry, box_class)
-        matched = {}
         for raw_frame, prediction in zip(raw, frames):
-            current, overlap = _match_frame(_prediction_boxes(prediction, box_class),
-                                             gt.get(raw_frame, {}), iou_fn)
-            matched[raw_frame] = current
-            previous_gt = gt.get(raw_frame - 1, {})
+            _, overlap = _match_frame(_prediction_boxes(prediction, box_class),
+                                      gt.get(raw_frame, {}), iou_fn)
             for gt_id in gt.get(raw_frame, {}):
                 totals["duplicate"] += max(0, overlap.get(gt_id, 0) - 1)
                 totals["duplicate_denominator"] += 1
-                if raw_frame != entry["start_frame"] and gt_id not in previous_gt:
-                    totals["birth_denominator"] += 1
-                    totals["birth_tp"] += int(gt_id in current)
-                elif gt_id in previous_gt:
-                    totals["keep_denominator"] += 1
-                    if gt_id in matched.get(raw_frame - 1, {}):
-                        totals["keep_tp"] += int(current.get(gt_id) == matched[raw_frame - 1][gt_id])
-            # A deletion candidate is a GT ID whose third following receiver
-            # frame remains absent; its prior matched runtime ID must be gone.
-            for gt_id in previous_gt:
-                if (gt_id not in gt.get(raw_frame, {}) and gt_id not in gt.get(raw_frame + 1, {})
-                        and gt_id not in gt.get(raw_frame + 2, {})):
-                    totals["delete_denominator"] += 1
-                    prior = matched.get(raw_frame - 1, {}).get(gt_id)
-                    if prior is not None:
-                        totals["delete_tp"] += int(prior not in _prediction_boxes(prediction, box_class))
     if totals["duplicate_denominator"] != AUDIT_DENOMINATORS["duplicate"]:
         raise RuntimeError("evaluator-GT duplicate denominator mismatch")
-    return {"birth": "%d/%d" % (totals["birth_tp"], totals["birth_denominator"]),
-            "keep": "%d/%d" % (totals["keep_tp"], totals["keep_denominator"]),
-            "delete": "%d/%d" % (totals["delete_tp"], totals["delete_denominator"]),
-            "duplicate": "%d/%d" % (totals["duplicate"], totals["duplicate_denominator"])}
+    return {"duplicate": "%d/%d" % (totals["duplicate"], totals["duplicate_denominator"])}
 
 
 def _target_lifecycle_audit(hypes, predictions, repository_root):
-    """Target-only evaluation labels; never supplied to OnlineDualCMP."""
+    """Target-only lifecycle audit from the evaluator-native label source."""
     box_class, iou_fn = _ab3d_geometry(repository_root)
     totals = {"states": 0, "first_frame_states": 0, "birth": 0, "birth_tp": 0,
               "keep": 0, "keep_tp": 0, "delete": 0, "delete_tp": 0}
     for entry in WINDOW:
         receiver, scene = entry["receiver_id"], entry["scene_id"]
-        hc = dict(hypes); hc["fusion"] = {"args": {"stage": "tracking", "tracking_frames": 3,
-            "runtime_only": False, "runtime_forbid_gt": True, "receiver_ids": [receiver], "max_actors": 128, "max_cav": 2}}
-        dataset = DualCMPSequenceDataset(hc, train=True)
-        keys = [key for key in dataset.index.receiver_frame_keys(scene, str(receiver))
-                if entry["start_frame"] <= int(key) <= entry["end_frame"]]
+        label_root = hypes.get("fusion", {}).get("args", {}).get("tracking_label_root")
+        if not label_root:
+            raise EnvironmentError("target lifecycle audit requires tracking_label_root")
+        raw_target = load_tracking_label_file(str(Path(label_root) / (scene + "-" + str(receiver) + ".txt")))
         target = {}
-        for key in keys:
-            frame = dataset._target_frame(scene, str(receiver), key, None, False)
-            target[int(key)] = {int(actor): box_class(x=float(box[0]), y=float(box[2]), z=float(box[1]), h=float(box[3]), w=float(box[4]), l=float(box[5]), ry=float(box[6]))
-                                for actor, box in zip(frame["actor_ids"], frame["current_boxes"]) if actor >= 0}
+        for raw in range(entry["start_frame"] - 1, entry["end_frame"] + 1):
+            if raw not in raw_target:
+                raise ValueError("tracking label missing audit frame %d" % raw)
+            target[raw] = {actor: box_class(x=float(box[0]), y=float(box[2]), z=float(box[1]),
+                                            h=float(box[3]), w=float(box[4]), l=float(box[5]), ry=float(box[6]))
+                           for actor, box in raw_target[raw].items()}
         matched = {}
         for index, prediction in enumerate(predictions[(scene, receiver)]):
             raw = int(prediction["frame_index"]); current, _ = _match_frame(_prediction_boxes(prediction, box_class), target[raw], iou_fn); matched[raw] = current
@@ -235,6 +223,9 @@ def _target_lifecycle_audit(hypes, predictions, repository_root):
 
 def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
     """Fresh strict-online 2x24-frame evaluation and GT-conditioned audit."""
+    label_root = hypes.get("fusion", {}).get("args", {}).get("tracking_label_root")
+    if not label_root:
+        raise EnvironmentError("fixed DualCMP evaluation requires tracking_label_root")
     predictions = {}
     for entry in WINDOW:
         receiver, scene_id = entry["receiver_id"], entry["scene_id"]
@@ -242,7 +233,7 @@ def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
         hypes_copy["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
             "stage": "tracking", "tracking_frames": 3, "runtime_only": True,
             "runtime_forbid_gt": True, "receiver_ids": [receiver], "frame_period_s": 0.1,
-            "max_actors": 128, "max_cav": 2,
+            "max_actors": 128, "max_cav": 2, "tracking_label_root": label_root,
         }}
         dataset = DualCMPSequenceDataset(hypes_copy, train=False)
         keys = [key for key in dataset.index.receiver_frame_keys(str(scene_id), str(receiver))
@@ -252,8 +243,10 @@ def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
         online = OnlineDualCMP(_model_from_checkpoint(hypes_copy, checkpoint, device), device)
         frames = []
         for key in keys:
-            frames.append(online.step(dataset._collate_runtime_frame([
-                dataset._runtime_frame(str(scene_id), str(receiver), key)])))
+            runtime = dataset._runtime_frame(str(scene_id), str(receiver), key)
+            prediction = online.step(dataset._collate_runtime_frame([runtime]))
+            reference_pose = dataset._pose(dataset.index.receiver_record(str(scene_id), "0", key))
+            frames.append(_prediction_in_reference(prediction, runtime["receiver_pose"], reference_pose))
         predictions[(str(scene_id), receiver)] = frames
     from opencood.tools.dualcmp.ab3dmot_metrics import compute_ab3dmot_metrics
     lifecycle = _target_lifecycle_audit(hypes, predictions, repository_root)
@@ -267,7 +260,8 @@ def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
               "keep": lifecycle["keep_tp"] >= AUDIT_THRESHOLDS["keep_same_runtime"],
               "delete": lifecycle["delete_tp"] >= AUDIT_THRESHOLDS["delete_tp"],
               "duplicate": duplicate_count <= AUDIT_THRESHOLDS["duplicate_max"]}
-    metrics = compute_ab3dmot_metrics(predictions, repository_root=repository_root)
+    metrics = compute_ab3dmot_metrics(predictions, repository_root=repository_root,
+                                      ground_truth_root=label_root)
     metric_pass = {key: metrics[key] >= threshold for key, threshold in METRIC_THRESHOLDS.items()
                    if key != "identity_switches_max"}
     metric_pass["identity_switches"] = metrics["identity_switches"] <= METRIC_THRESHOLDS["identity_switches_max"]
@@ -289,10 +283,13 @@ def main():
     args = parser.parse_args()
     if "V2V4REAL_ROOT" not in os.environ:
         raise EnvironmentError("V2V4REAL_ROOT must point to the V2V4Real split root")
+    if "DUALCMP_TRACKING_LABEL_ROOT" not in os.environ:
+        raise EnvironmentError("DUALCMP_TRACKING_LABEL_ROOT must point to evaluator-native labels")
     hypes = load_yaml(args.hypes)
     hypes["root_dir"] = str(Path(os.environ["V2V4REAL_ROOT"]) / "test")
     hypes["validate_dir"] = hypes["root_dir"]
     hypes["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    hypes["fusion"] = {"args": {"tracking_label_root": os.environ["DUALCMP_TRACKING_LABEL_ROOT"]}}
     if args.evaluate_output:
         import json
         result = run_fixed_evaluation(hypes, args.checkpoint, args.device)

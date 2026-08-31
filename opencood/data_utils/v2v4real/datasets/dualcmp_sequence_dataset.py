@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -87,6 +88,12 @@ class DualCMPSequenceDataset(Dataset):
         if not self.runtime_only and (self.post_processor is None or self.anchor_box is None):
             raise RuntimeError("DualCMP targets require postprocessor and anchor_box when runtime_only is false")
         self.target_builder = CausalTargetBuilder(self.lidar_range, self.max_actors, params["postprocess"].get("order", "hwl"))
+        configured_label_root = args.get("tracking_label_root")
+        self.tracking_label_root = None
+        if configured_label_root is not None:
+            self.tracking_label_root = str(Path(str(configured_label_root)).expanduser().resolve())
+            if not Path(self.tracking_label_root).is_dir():
+                raise FileNotFoundError("DualCMP tracking_label_root does not exist: %s" % self.tracking_label_root)
         split_name = str(args.get("split_name", "train" if self.train else "val"))
         root_dir = params["root_dir"] if self.train else (params.get("test_dir") if split_name == "test" and "test_dir" in params else params["validate_dir"])
         manifest = args.get("split_manifest") or params.get("split_manifest")
@@ -197,6 +204,11 @@ class DualCMPSequenceDataset(Dataset):
         return runtime
 
     def _actors(self, scene_id: str, receiver_id: str, frame_key: str, receiver_pose: np.ndarray) -> dict:
+        if self.tracking_label_root is not None:
+            reference = self.index.receiver_record(scene_id, "0", frame_key)
+            return self.target_builder.actors_from_tracking_labels(
+                self.tracking_label_root, scene_id, receiver_id, int(frame_key),
+                self._pose(reference), receiver_pose)
         record = self.index.receiver_record(scene_id, receiver_id, frame_key)
         yaml_params = _load_yaml_cached(str(record.yaml_path))
         return self.target_builder.actors_in_receiver(yaml_params, receiver_pose)

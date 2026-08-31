@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional, Sequence
+from pathlib import Path
+from functools import lru_cache
+from typing import Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -14,6 +16,44 @@ def source_to_receiver_transform(source_pose: np.ndarray, receiver_pose: np.ndar
     if source_pose.shape != (4, 4) or receiver_pose.shape != (4, 4):
         raise ValueError("V2V4Real lidar_pose must be a homogeneous 4x4 matrix")
     return (np.linalg.inv(receiver_pose) @ source_pose).astype(np.float32)
+
+
+def transform_tracking_boxes(boxes: np.ndarray, source_pose: np.ndarray,
+                             destination_pose: np.ndarray) -> np.ndarray:
+    """Rigidly project ``[x,y,z,h,w,l,yaw]`` boxes between LiDAR frames."""
+    boxes = np.asarray(boxes, dtype=np.float32)
+    if boxes.ndim != 2 or boxes.shape[1] != 7 or not np.isfinite(boxes).all():
+        raise ValueError("tracking boxes must be finite [N,7]")
+    if boxes.shape[0] == 0:
+        return boxes.copy()
+    corners = box_utils_v2v4real.boxes_to_corners_3d(boxes.copy(), order="hwl")
+    projected = box_utils_v2v4real.project_box3d(
+        corners, source_to_receiver_transform(source_pose, destination_pose))
+    return box_utils_v2v4real.corner_to_center(projected, order="hwl").astype(np.float32)
+
+
+@lru_cache(maxsize=64)
+def load_tracking_label_file(path: str) -> Dict[int, Dict[int, np.ndarray]]:
+    """Read evaluator-native KITTI labels into CAV0 reference boxes by frame."""
+    result = {}
+    for line_number, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.split()
+        if len(fields) < 17 or fields[2].lower() != "car":
+            raise ValueError("invalid tracking label line %d in %s" % (line_number, path))
+        frame, track_id = int(fields[0]), int(fields[1])
+        # The evaluator's V2V4Real writer stores LiDAR [x,y,z] as KITTI
+        # camera [x,z,y]; undo only that documented interface conversion.
+        box = np.asarray([float(fields[13]), float(fields[15]), float(fields[14]),
+                          float(fields[10]), float(fields[11]), float(fields[12]),
+                          float(fields[16])], dtype=np.float32)
+        if frame < 0 or track_id < 0 or not np.isfinite(box).all() or np.any(box[3:6] <= 0):
+            raise ValueError("invalid tracking label values in %s:%d" % (path, line_number))
+        if track_id in result.setdefault(frame, {}):
+            raise ValueError("duplicate tracking ID %d in frame %d of %s" % (track_id, frame, path))
+        result[frame][track_id] = box
+    if not result:
+        raise ValueError("tracking label contains no Car states: %s" % path)
+    return result
 
 
 class CausalTargetBuilder:
@@ -51,6 +91,27 @@ class CausalTargetBuilder:
                 )
             actors[actor_id] = np.asarray(content["coord"][0], dtype=np.float32)
         return actors
+
+    def actors_from_tracking_labels(self, label_root: str, scene_id: str,
+                                    receiver_id: str, frame_index: int,
+                                    reference_pose: Optional[np.ndarray] = None,
+                                    receiver_pose: Optional[np.ndarray] = None) -> dict:
+        """Return stable label track IDs in CAV0 reference or receiver coordinates."""
+        path = Path(label_root) / (str(scene_id) + "-" + str(receiver_id) + ".txt")
+        if not path.is_file():
+            raise FileNotFoundError("tracking label missing: %s" % path)
+        labels = load_tracking_label_file(str(path))
+        if int(frame_index) not in labels:
+            raise ValueError("tracking label missing frame %d in %s" % (frame_index, path))
+        actors = labels[int(frame_index)]
+        if reference_pose is None and receiver_pose is None:
+            return {track_id: box.copy() for track_id, box in actors.items()}
+        if reference_pose is None or receiver_pose is None:
+            raise ValueError("both reference_pose and receiver_pose are required for projection")
+        ids = sorted(actors)
+        transformed = transform_tracking_boxes(
+            np.stack([actors[track_id] for track_id in ids]), reference_pose, receiver_pose)
+        return {track_id: transformed[index] for index, track_id in enumerate(ids)}
 
     def build_current(self, current_actors: Mapping[int, np.ndarray], previous_actors: Optional[Mapping[int, np.ndarray]],
                       frame_period_s: float) -> dict:
