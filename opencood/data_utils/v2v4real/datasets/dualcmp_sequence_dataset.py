@@ -117,7 +117,7 @@ class DualCMPSequenceDataset(Dataset):
                 frame_count = len(self.index.receiver_frame_keys(scene_id, receiver_id))
                 # Tracking needs a real previous receiver frame for the first
                 # supervision target; it never duplicates a boundary frame.
-                first_start = 0 if self.stage == "detection" else 1
+                first_start = 0 if self.stage == "detection" else (self.forecast_history_frames if self.stage == "forecast" else 1)
                 for start in range(first_start, frame_count - self.clip_length + 1, self.clip_stride):
                     self.clip_records.append(ClipRecord(scene_id, receiver_id, start))
         window_entries = args.get("window")
@@ -136,7 +136,7 @@ class DualCMPSequenceDataset(Dataset):
                 record for record in self.clip_records
                 if any(
                     record.scene_id == scene_id and record.receiver_id == receiver_id
-                    and start_frame <= int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position])
+                    and start_frame <= int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position + self.clip_length - 1])
                     and int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position + self.clip_length - 1]) <= end_frame
                     for scene_id, receiver_id, start_frame, end_frame in allowed
                 )
@@ -235,9 +235,11 @@ class DualCMPSequenceDataset(Dataset):
             future_xy = np.zeros((self.max_actors, self.future_frames, 2), dtype=np.float32)
             future_mask = np.zeros((self.max_actors, self.future_frames), dtype=np.bool_)
             current_ids = target["actor_ids"]
-            current_pose = self._pose(receiver)
             for horizon, future_key in enumerate(keys[current_position + 1: current_position + 1 + self.future_frames]):
-                future = self._actors(scene_id, receiver_id, future_key, current_pose)
+                future_receiver = self.index.receiver_record(scene_id, receiver_id, future_key)
+                # CoLIF _receiver_forecast_target: each future target remains
+                # in its own receiver capture frame; this is target-only.
+                future = self._actors(scene_id, receiver_id, future_key, self._pose(future_receiver))
                 for actor_index, actor_id in enumerate(current_ids):
                     if actor_id >= 0 and actor_id in future:
                         future_xy[actor_index, horizon] = future[actor_id][:2] - target["current_boxes"][actor_index, :2]

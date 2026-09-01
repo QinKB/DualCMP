@@ -40,13 +40,21 @@ def _protocol_sha256():
     return _sha256_file(Path(__file__).resolve().with_name("protocol.py"))
 
 
-def _checkpoint_provenance(checkpoint, payload=None):
+def _checkpoint_provenance(checkpoint, payload=None, allow_dirty_smoke=False):
     """Reject checkpoints that cannot prove their code and protocol origin."""
     checkpoint = Path(checkpoint)
     payload = torch.load(checkpoint, map_location="cpu") if payload is None else payload
     if not isinstance(payload, dict) or not isinstance(payload.get("provenance"), dict):
         raise RuntimeError("checkpoint provenance metadata is required for DualCMP evaluation")
     provenance = payload["provenance"]
+    if provenance.get("source_state") == "dirty-smoke":
+        if not allow_dirty_smoke:
+            raise RuntimeError("dirty-smoke checkpoint requires explicit allow_dirty_smoke")
+        from opencood.tools.dualcmp.train_forecast_ddp import _provenance
+        current = _provenance()
+        if current.get("source_state") != "dirty-smoke" or any(provenance.get(key) != current.get(key) for key in ("base_sha", "source_tree_sha256", "protocol_sha256")):
+            raise RuntimeError("dirty-smoke checkpoint source manifest does not match current task sources")
+        return {"checkpoint_sha256": _sha256_file(checkpoint), "source_state": "dirty-smoke", "base_sha": provenance["base_sha"], "source_tree_sha256": provenance["source_tree_sha256"], "checkpoint_protocol_sha256": provenance["protocol_sha256"], "current_protocol_sha256": _protocol_sha256()}
     source_sha = provenance.get("source_sha")
     protocol_sha = provenance.get("protocol_sha256")
     if not isinstance(source_sha, str) or not _SHA1_RE.match(source_sha):
@@ -61,16 +69,18 @@ def _checkpoint_provenance(checkpoint, payload=None):
             "current_protocol_sha256": current_protocol_sha}
 
 
-def _model_from_checkpoint(hypes, checkpoint, device):
+def _model_from_checkpoint(hypes, checkpoint, device, forecast_args=None,
+                           allow_dirty_smoke=False):
     postprocessor = build_postprocessor(hypes["postprocess"], train=False)
     target_args = hypes["postprocess"]["target_args"]
     model = DualCmpClipModel(hypes["model"]["args"], postprocessor.generate_anchor_box(),
                              hypes["preprocess"]["cav_lidar_range"],
                              proposal_score_threshold=target_args["score_threshold"],
                              proposal_nms_thresh=hypes["postprocess"]["nms_thresh"],
-                             emission_threshold=target_args["score_threshold"])
+                             emission_threshold=target_args["score_threshold"],
+                             forecast_args=forecast_args)
     payload = torch.load(checkpoint, map_location="cpu")
-    _checkpoint_provenance(checkpoint, payload)
+    _checkpoint_provenance(checkpoint, payload, allow_dirty_smoke=allow_dirty_smoke)
     state_dict = payload.get("model", payload.get("model_state_dict", payload))
     if any(key.startswith("module.") for key in state_dict):
         state_dict = {key[7:] if key.startswith("module.") else key: value
@@ -87,7 +97,7 @@ class OnlineDualCMP(object):
         self._states = {}
 
     @torch.no_grad()
-    def step(self, runtime_frame):
+    def step(self, runtime_frame, run_forecast=False):
         """Consume one already-collated runtime frame and emit one prediction."""
         if "target_frames" in runtime_frame or "fused_label_dict" in runtime_frame:
             raise ValueError("online inference accepts runtime data only")
@@ -96,12 +106,19 @@ class OnlineDualCMP(object):
             raise ValueError("online inference requires one receiver frame per call")
         key = (str(runtime_frame["scene_id"][0]), int(runtime_frame["receiver_id"][0]))
         state = self._states.get(key)
-        outputs, state = self.model([runtime_frame], state=state)
+        outputs, state = self.model([runtime_frame], state=state, run_forecast=run_forecast)
+        self._last_output = outputs[-1]
         self._states[key] = state.detached()
         active = state.active_mask[0]
-        return tracking_frame_prediction(
+        prediction = tracking_frame_prediction(
             int(runtime_frame["receiver_frame_idx"][0]), state.runtime_id[0, active],
             state.box[0, active], state.score[0, active])
+        if run_forecast and "forecast" in outputs[-1]:
+            forecast = outputs[-1]["forecast"]; indices = torch.nonzero(active & forecast["forecast_valid_mask"][0], as_tuple=False).flatten()
+            prediction["forecast_runtime_ids"] = state.runtime_id[0, indices].tolist()
+            prediction["forecast_scores"] = forecast["pred_scores"][0, indices].detach().cpu().tolist()
+            prediction["forecast_trajs"] = forecast["pred_trajs"][0, indices, :, :, :2].detach().cpu().tolist()
+        return prediction
 
     def reset_scene(self, scene_id):
         scene_id = str(scene_id)

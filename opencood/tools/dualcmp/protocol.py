@@ -13,6 +13,18 @@ TRACKING_FRAMES = 3
 DETECTOR_COMPRESSION = 32
 CLIPS_PER_RECEIVER = WINDOW_FRAMES - TRACKING_FRAMES + 1
 TOTAL_CLIPS = CLIPS_PER_RECEIVER * len(WINDOW)
+# Phase-B forecast target-only protocol: eleven capture-native observations
+# (ten history plus current) and fifty moving-receiver future states.
+FORECAST_WINDOW = (
+    {"scene_id": "testoutput_CAV_data_2022-03-17-11-02-23_2", "receiver_id": 0,
+     "start_frame": 237, "end_frame": 244},
+    {"scene_id": "testoutput_CAV_data_2022-03-17-11-02-23_2", "receiver_id": 1,
+     "start_frame": 237, "end_frame": 244},
+)
+FORECAST_HISTORY_FRAMES = 11
+FORECAST_FUTURE_FRAMES = 50
+FORECAST_SAMPLES = 16
+FORECAST_COMPLETE_TARGETS = 94
 AUDIT_DENOMINATORS = {"states": 948, "first_frame_states": 38,
                       "birth": 35, "keep": 875, "delete": 26,
                       "duplicate": 948}

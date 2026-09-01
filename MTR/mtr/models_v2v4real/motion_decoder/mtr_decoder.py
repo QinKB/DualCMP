@@ -119,7 +119,7 @@ class MTRDecoder(nn.Module):
             intention_points = {}
             for cur_type in self.object_type:
                 cur_intention_points = intention_points_dict[cur_type]
-                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2).cuda()
+                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2)
                 intention_points[cur_type] = cur_intention_points
 
             intention_query_mlps = common_layers.build_mlps(
@@ -133,7 +133,7 @@ class MTRDecoder(nn.Module):
             intention_points = {}
             for cur_type in self.object_type:
                 cur_intention_points = intention_points_dict[cur_type]
-                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2).cuda()
+                cur_intention_points = torch.from_numpy(cur_intention_points).float().view(-1, 2)
                 intention_points[cur_type] = cur_intention_points
 
             intention_query_mlps = common_layers.build_mlps(
@@ -199,7 +199,8 @@ class MTRDecoder(nn.Module):
             raise NotImplementedError
         else:
             intention_points = torch.stack([
-                self.intention_points[center_objects_type[obj_idx]]
+                self.intention_points[center_objects_type[obj_idx]].to(
+                    next(self.parameters()).device)
                 for obj_idx in range(num_center_objects)], dim=0)
             intention_points = intention_points.permute(1, 0, 2)  # (num_query, num_center_objects, 2)
 
@@ -307,7 +308,7 @@ class MTRDecoder(nn.Module):
 
         return sorted_idxs.int(), base_map_idxs
 
-    def apply_transformer_decoder(self, center_objects_feature, center_objects_type, obj_feature, obj_mask, obj_pos):
+    def apply_transformer_decoder(self, center_objects_feature, center_objects_type, obj_feature, obj_mask, obj_pos, query_feature_hook=None):
         intention_query, intention_points = self.get_motion_query(center_objects_type)
         query_content = torch.zeros_like(intention_query)
         self.forward_ret_dict['intention_points'] = intention_points.permute(1, 0, 2)  # (num_center_objects, num_query, 2)
@@ -337,6 +338,8 @@ class MTRDecoder(nn.Module):
             query_content = self.query_feature_fusion_layers[layer_idx](
                 query_feature.flatten(start_dim=0, end_dim=1)
             ).view(num_query, num_center_objects, -1) 
+            if query_feature_hook is not None:
+                query_content = query_feature_hook(query_content=query_content, intention_query=intention_query, dynamic_query_center=dynamic_query_center, layer_idx=layer_idx)
 
             # motion prediction
             query_content_t = query_content.permute(1, 0, 2).contiguous().view(num_center_objects * num_query, -1)
@@ -500,7 +503,7 @@ class MTRDecoder(nn.Module):
 
         return pred_scores_final, pred_trajs_final
 
-    def forward(self, batch_dict):
+    def forward(self, batch_dict, query_feature_hook=None, store_training_targets=True):
         input_dict = batch_dict['input_dict']
         obj_feature, obj_mask, obj_pos = batch_dict['obj_feature'], batch_dict['obj_mask'], batch_dict['obj_pos']
         center_objects_feature = batch_dict['center_objects_feature']
@@ -520,7 +523,7 @@ class MTRDecoder(nn.Module):
         pred_list = self.apply_transformer_decoder(
             center_objects_feature=center_objects_feature,
             center_objects_type=input_dict['center_objects_type'],
-            obj_feature=obj_feature, obj_mask=obj_mask, obj_pos=obj_pos
+            obj_feature=obj_feature, obj_mask=obj_mask, obj_pos=obj_pos, query_feature_hook=query_feature_hook
         )
 
         self.forward_ret_dict['pred_list'] = pred_list
@@ -529,7 +532,7 @@ class MTRDecoder(nn.Module):
         batch_dict['pred_scores'] = pred_scores
         batch_dict['pred_trajs'] = pred_trajs
 
-        if self.training:
+        if self.training and store_training_targets:
             self.forward_ret_dict['center_gt_trajs'] = input_dict['center_gt_trajs']
             self.forward_ret_dict['center_gt_trajs_mask'] = input_dict['center_gt_trajs_mask']
             self.forward_ret_dict['center_gt_final_valid_idx'] = input_dict['center_gt_final_valid_idx']

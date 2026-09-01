@@ -35,6 +35,8 @@ class ActorState:
     last_update_time_s: torch.Tensor
     history_box: torch.Tensor
     history_mask: torch.Tensor
+    forecast_history_box: torch.Tensor
+    forecast_history_mask: torch.Tensor
     filter_mean: torch.Tensor
     filter_cov: torch.Tensor
     receiver_pose: torch.Tensor
@@ -78,6 +80,8 @@ class ActorState:
             last_update_time_s=torch.full((batch_size, max_actors), float("nan"), device=device, dtype=dtype),
             history_box=torch.zeros(batch_size, max_actors, history_len, 7, device=device, dtype=dtype),
             history_mask=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=torch.bool),
+            forecast_history_box=torch.zeros(batch_size, max_actors, history_len, 7, device=device, dtype=dtype),
+            forecast_history_mask=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=torch.bool),
             filter_mean=torch.zeros(batch_size, max_actors, 10, device=device, dtype=dtype),
             filter_cov=torch.zeros(batch_size, max_actors, 10, 10, device=device, dtype=dtype),
             receiver_pose=receiver_pose,
@@ -99,7 +103,8 @@ class ActorState:
         float_fields = {
             "feature": self.feature, "box": self.box, "velocity": self.velocity,
             "score": self.score, "quality": self.quality,
-            "history_box": self.history_box, "filter_mean": self.filter_mean,
+            "history_box": self.history_box, "forecast_history_box": self.forecast_history_box,
+            "filter_mean": self.filter_mean,
             "filter_cov": self.filter_cov, "receiver_pose": self.receiver_pose,
             "receiver_time_s": self.receiver_time_s,
         }
@@ -125,8 +130,14 @@ class ActorState:
             raise ValueError("history_box must have shape [B,A,H,7]")
         if self.history_mask.shape != self.history_box.shape[:-1] or self.history_mask.dtype != torch.bool:
             raise ValueError("history_mask must match history_box [B,A,H]")
+        if self.forecast_history_box.shape != self.history_box.shape:
+            raise ValueError("forecast_history_box must match history_box [B,A,H,7]")
+        if self.forecast_history_mask.shape != self.forecast_history_box.shape[:-1] or self.forecast_history_mask.dtype != torch.bool:
+            raise ValueError("forecast_history_mask must match forecast_history_box [B,A,H]")
         if torch.any(self.history_mask & ~self.valid_mask[:, :, None]):
             raise ValueError("history_mask can only be set for valid actors")
+        if torch.any(self.forecast_history_mask & ~self.valid_mask[:, :, None]):
+            raise ValueError("forecast_history_mask can only be set for valid actors")
         if self.filter_mean.shape != (batch_size, max_actors, 10):
             raise ValueError("filter_mean must have shape [B,A,10]")
         if self.filter_cov.shape != (batch_size, max_actors, 10, 10):
@@ -204,7 +215,7 @@ class ActorState:
                 values[item.name] = torch.where(row_mask(value), torch.full_like(value, -1), value)
             elif item.name == "next_runtime_id":
                 values[item.name] = torch.where(reset_id_counter_mask, torch.zeros_like(value), value)
-            elif item.name in ("valid_mask", "active_mask", "history_mask"):
+            elif item.name in ("valid_mask", "active_mask", "history_mask", "forecast_history_mask"):
                 values[item.name] = torch.where(row_mask(value), torch.zeros_like(value), value)
             elif item.name == "last_update_time_s":
                 values[item.name] = torch.where(row_mask(value), torch.full_like(value, float("nan")), value)
