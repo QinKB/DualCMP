@@ -24,11 +24,15 @@ class DualCmpLoss(nn.Module):
             det = det + self.detector_loss(output, target["fused_label_dict"])
             state = output["state"]
             gt_mask, gt_boxes, gt_ids = target["current_mask"], target["current_boxes"], target["actor_ids"]
-            # Target-only existing-first then Hungarian newborn assignment.
+            # JDT3D TrackingLoss::loss_single_frame first inherits the identity
+            # owned by each existing track.  A disappeared owner remains an
+            # existence negative (matched_gt_idxes=-2 there), rather than an
+            # unmatched proposal that may acquire another GT identity.
             # Runtime IDs never read GT; bindings are loss-local only.
             assigned = torch.full_like(state.runtime_id, -1)
             for row in range(state.box.shape[0]):
                 remaining = set(torch.nonzero(gt_mask[row], as_tuple=False).flatten().tolist())
+                owned_slots = set()
                 for slot, binding in list(bindings[row].items()):
                     previous_runtime_id, previous_id = binding
                     if (not bool(state.valid_mask[row, slot]) or
@@ -36,12 +40,15 @@ class DualCmpLoss(nn.Module):
                         # Deleted slots can be reused by a newborn runtime ID.
                         bindings[row].pop(slot)
                         continue
+                    owned_slots.add(slot)
                     found = torch.nonzero((gt_ids[row] == previous_id) & gt_mask[row], as_tuple=False).flatten()
                     if found.numel():
                         index = int(found[0]); assigned[row, slot] = index; remaining.discard(index)
-                    else:
-                        bindings[row].pop(slot)
-                slots = [slot for slot in torch.nonzero(state.valid_mask[row], as_tuple=False).flatten().tolist() if assigned[row, slot] < 0]
+                    # Otherwise retain (slot, runtime_id, gt_id) ownership:
+                    # this valid track is supervised as a negative below and
+                    # cannot be Hungarian-rebound until deletion/runtime reuse.
+                slots = [slot for slot in torch.nonzero(state.valid_mask[row], as_tuple=False).flatten().tolist()
+                         if assigned[row, slot] < 0 and slot not in owned_slots]
                 if slots and remaining:
                     gt = sorted(remaining)
                     pred = output["track_box"][row, slots]
