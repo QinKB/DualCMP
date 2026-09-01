@@ -91,4 +91,4 @@
 | CP-20260901-04 | `5f84817` | source-preserved forecast preflight | two-GPU run12 + fresh CMP metrics | 800-step overfit |
 | CP-20260901-05 | `fd9189c` | restore fixed CoLIF/CMP heading boundary | two-GPU smoke + fresh CMP eval | 800-step result |
 | CP-20260901-06 | `d2ee211` | official-aligned Phase-B code | global-loss/freeze smoke + clean 800-step gate | Phase C |
-| CP-20260902-01 | pending | full-data Phase A/B and Phase-C joint integration | two-GPU epoch-schedule preflights | Phase A 20 epochs |
+| CP-20260902-01 | `eef81d0` | full-data Phase A/B and Phase-C joint integration | two-GPU epoch-schedule preflights | Phase A 20 epochs |
