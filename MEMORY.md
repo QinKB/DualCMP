@@ -30,6 +30,10 @@
 
 ## Lessons
 
+- Formal long runs require global `metrics.csv` rows every 100 updates, a
+  global epoch train mean, and the authoritative test metric every epoch.
+  Checkpoints must include optimizer/scheduler; model-only epoch checkpoints
+  are recovery artifacts, not resumable formal training.
 - A label oracle, syntax check, unit test or decreasing loss is not model
   acceptance. Every learned stage must reach real data, two-GPU training,
   checkpoint, fresh inference and authoritative metrics.
@@ -40,6 +44,9 @@
 
 ## Open
 
+- Phase-A CSV/test/resume integration passed a two-GPU two-epoch fixed-window
+  run: epoch MOTA `0.9715/0.9778`, no duplicate CSV keys, scheduler budget
+  preserved at 44 steps. Restart the formal 20-epoch run from initialization.
 - Formal schedules are source-backed and epoch-based: Phase A uses JDT3D's
   20-epoch T=3 one-cycle cosine; Phase B uses CMP/MTR's 30 epochs and
   22/24/26/28 milestones; Phase C uses UniAD/UniV2X's 20-epoch warmup-cosine.

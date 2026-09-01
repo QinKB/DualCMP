@@ -32,27 +32,17 @@ from opencood.tools.dualcmp.protocol import (
 )
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args()
-    if int(os.environ.get("WORLD_SIZE", "1")) != 2:
-        raise RuntimeError("tracking evaluation requires two torchrun processes")
-    root = os.environ.get("V2V4REAL_ROOT")
-    labels = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
+def evaluate_tracking_model_ddp(model, hypes, device, root, labels):
+    """Evaluate the current DDP model on the frozen V2V4Real *test* window."""
+    if not dist.is_initialized() or dist.get_world_size() != 2:
+        raise RuntimeError("tracking evaluation requires two initialized DDP processes")
     if not root or not labels:
-        raise EnvironmentError(
-            "V2V4REAL_ROOT and DUALCMP_TRACKING_LABEL_ROOT are required"
-        )
-    dist.init_process_group("nccl")
-    rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
+        raise EnvironmentError("V2V4REAL_ROOT and DUALCMP_TRACKING_LABEL_ROOT are required")
+    rank = dist.get_rank()
+    was_training = model.training
+    model.eval()
     entry = WINDOW[rank]
-    h = load_yaml(
-        "opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml"
-    )
+    h = dict(hypes)
     h["root_dir"] = str(Path(root) / "test")
     h["validate_dir"] = h["root_dir"]
     h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
@@ -72,32 +62,7 @@ def main():
     ]
     if len(keys) != WINDOW_FRAMES:
         raise RuntimeError("fixed tracking window must contain 24 frames")
-    payload = torch.load(args.checkpoint, map_location="cpu")
-    checkpoint_state = payload.get(
-        "model", payload.get("model_state_dict", payload)
-    )
-    has_forecast_head = any(
-        (key[7:] if key.startswith("module.") else key).startswith(
-            "forecast_head."
-        )
-        for key in checkpoint_state
-    )
-    forecast_args = None
-    if has_forecast_head:
-        forecast_args = {
-            "history_frames": 11, "future_frames": 50, "modes": 6,
-            "intention_points_file":
-                "preprocessed_data/v2v4real/"
-                "v2v4real_cluster_64_center_dict.pkl",
-        }
-    online = OnlineDualCMP(
-        _model_from_checkpoint(
-            h, args.checkpoint, device,
-            forecast_args=forecast_args,
-            allow_dirty_smoke=True,
-        ),
-        device,
-    )
+    online = OnlineDualCMP(model.module if hasattr(model, "module") else model, device)
     frames = []
     for key in keys:
         runtime = dataset._runtime_frame(
@@ -151,13 +116,43 @@ def main():
         )
         passed.update(metric_pass)
         report = {
-            "provenance": _checkpoint_provenance(
-                args.checkpoint, allow_dirty_smoke=True
-            ),
             "metrics": metrics,
             "audit": {"numerator": lifecycle, "rate": rates,
                       "pass": passed, "overall_pass": all(passed.values())},
         }
+    dist.barrier()
+    if was_training:
+        model.train()
+    return report if rank == 0 else None
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    if int(os.environ.get("WORLD_SIZE", "1")) != 2:
+        raise RuntimeError("tracking evaluation requires two torchrun processes")
+    root = os.environ.get("V2V4REAL_ROOT")
+    labels = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
+    if not root or not labels:
+        raise EnvironmentError("V2V4REAL_ROOT and DUALCMP_TRACKING_LABEL_ROOT are required")
+    dist.init_process_group("nccl")
+    rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda", local_rank)
+    h = load_yaml("opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml")
+    payload = torch.load(args.checkpoint, map_location="cpu")
+    state = payload.get("model", payload.get("model_state_dict", payload))
+    forecast_args = None
+    if any((key[7:] if key.startswith("module.") else key).startswith("forecast_head.") for key in state):
+        forecast_args = {"history_frames": 11, "future_frames": 50, "modes": 6,
+                         "intention_points_file": "preprocessed_data/v2v4real/v2v4real_cluster_64_center_dict.pkl"}
+    model = _model_from_checkpoint(h, args.checkpoint, device, forecast_args=forecast_args,
+                                   allow_dirty_smoke=True)
+    report = evaluate_tracking_model_ddp(model, h, device, root, labels)
+    if rank == 0:
+        report["provenance"] = _checkpoint_provenance(args.checkpoint, allow_dirty_smoke=True)
         Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report))
     dist.barrier()

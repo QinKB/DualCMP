@@ -144,6 +144,14 @@ class DualCMPSequenceDataset(Dataset):
                 record for record in self.clip_records
                 if any(
                     record.scene_id == scene_id and record.receiver_id == receiver_id
+                    and (
+                        self.stage != "tracking"
+                        or start_frame <= int(
+                            self.index.receiver_frame_keys(
+                                scene_id, receiver_id
+                            )[record.start_position]
+                        )
+                    )
                     and start_frame <= int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position + self.clip_length - 1])
                     and int(self.index.receiver_frame_keys(scene_id, receiver_id)[record.start_position + self.clip_length - 1]) <= end_frame
                     for scene_id, receiver_id, start_frame, end_frame in allowed

@@ -121,3 +121,13 @@
 - Joint 100-step calibration rejected base LR `1e-4`; base `1e-5` improved
   tracking while retaining reasonable forecast metrics. Formal Phase C keeps
   that LR with 500-step warmup and cosine decay.
+
+## 2026-09-02 — Phase-A global CSV and per-epoch test evaluation
+
+- Stopped the first formal run after epoch 8 because the trainer produced only
+  model checkpoints and no step/epoch logs or epoch-end test metrics.
+- Reused QCNet's step/epoch logging semantics, OpenCOOD global sum/count,
+  MTR resumable checkpoint pattern, and the existing DualCMP AB3DMOT gather.
+- Two-GPU stop/resume acceptance completed 2 epochs/44 steps with 12 CSV rows,
+  no duplicate keys, full optimizer/scheduler state, and test MOTA
+  `0.9715/0.9778`. No loss, metric, or threshold was changed.

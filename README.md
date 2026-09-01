@@ -40,16 +40,22 @@ conda activate coop
 
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
+DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test \
 DUALCMP_PHASE_A_INIT_WEIGHTS=runs/train-track-bind-s20260831/checkpoint.pt \
-env -u DUALCMP_TRACKING_LABEL_ROOT \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_tracking_ddp \
   --output-dir runs/phase-a-full-s20260902 \
   --full-data --data-split train --epochs 20 \
   --batch-size 4 --workers 8 \
   --lr 5e-5 --max-lr 5e-4 --weight-decay 0.01 \
-  --save-every 4
+  --log-every 100 --eval-every 1 --save-every 1
 ```
+
+`metrics.csv` receives globally synchronized train rows every 100 updates and
+one `train+test` row per epoch. Test columns are explicitly prefixed `test_`;
+each epoch also writes `test_metrics_epoch_XXX.json`. Checkpoints contain model,
+optimizer, scheduler, completed epoch, global step, and provenance for exact
+same-budget resume.
 
 ## Phase B — full forecast training
 

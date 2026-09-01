@@ -6,6 +6,7 @@ GPU; the frozen window below has 44 receiver-centric clips (22 per receiver).
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -29,8 +30,13 @@ from opencood.loss.dualcmp_loss import DualCmpLoss
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRESSION, TOTAL_CLIPS, WINDOW, WINDOW_FRAMES
+from opencood.tools.dualcmp.eval_tracking_ddp import evaluate_tracking_model_ddp
 
 LOSS_KEYS = ("L_det", "L_exist", "L_box", "L_velocity")
+CSV_FIELDS = ("kind", "split", "epoch", "global_step", "global_samples", "lr_trunk", "lr_heads",
+              "L_det", "L_exist", "L_box", "L_velocity", "L_total",
+              "test_MOTA", "test_AMOTA", "test_sAMOTA", "test_recall", "test_precision",
+              "test_IDS", "test_fragments", "test_overall_pass")
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -59,7 +65,8 @@ def _run_provenance(args, world_size, gpu_names):
             "argv": list(sys.argv), "world_size": int(world_size),
             "gpu_names": list(gpu_names), "seed": int(args.seed),
             "epochs": int(args.epochs), "lr": float(args.lr), "amp": bool(args.amp),
-            "per_rank_batch": 1, "global_batch": int(world_size), "workers": 0,
+            "per_rank_batch": int(args.batch_size), "global_batch": int(args.batch_size * world_size),
+            "workers_per_rank": int(args.workers),
             "window_frames": WINDOW_FRAMES, "clips_per_receiver": CLIPS_PER_RECEIVER,
             "total_clips": TOTAL_CLIPS, "window": list(WINDOW)}
 
@@ -79,8 +86,8 @@ def _hypes(path, args=None):
     detector_weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
     label_root = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
     full_data = bool(args is not None and args.full_data)
-    if not root or not (phase_a_weights or detector_weights) or (not full_data and not label_root):
-        raise EnvironmentError("V2V4REAL_ROOT and either DUALCMP_PHASE_A_INIT_WEIGHTS or DUALCMP_DETECTOR_WEIGHTS are required; fixed acceptance also requires DUALCMP_TRACKING_LABEL_ROOT")
+    if not root or not (phase_a_weights or detector_weights) or not label_root:
+        raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, and either DUALCMP_PHASE_A_INIT_WEIGHTS or DUALCMP_DETECTOR_WEIGHTS are required")
     if phase_a_weights and detector_weights:
         raise EnvironmentError("set only one Phase-A initialization checkpoint")
     split = args.data_split if full_data else "test"
@@ -141,6 +148,41 @@ def _assert_sync(model):
     dist.all_gather(gathered, values)
     if not all(torch.allclose(values, other) for other in gathered):
         raise RuntimeError("DDP parameters diverged across ranks")
+
+
+def _global_loss(loss, batch_size, device):
+    values = torch.stack([loss[key].detach().float() for key in LOSS_KEYS + ("total_loss",)])
+    if not torch.isfinite(values).all():
+        raise FloatingPointError("non-finite DualCMP loss")
+    totals = torch.cat((values * float(batch_size), values.new_tensor([float(batch_size)])))
+    dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    return totals[:-1].cpu().tolist(), int(totals[-1].item())
+
+
+def _append_csv(path, row):
+    new_file = not path.exists()
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        if new_file:
+            writer.writeheader()
+        writer.writerow({key: row.get(key, "") for key in CSV_FIELDS})
+
+
+def _trim_csv_after_checkpoint(path, step):
+    if not path.exists():
+        return
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows([row for row in rows if int(row.get("global_step") or 0) <= step])
+
+
+def _atomic_save(payload, path):
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(payload, temporary)
+    os.replace(str(temporary), str(path))
 
 
 def train(args):
@@ -205,13 +247,42 @@ def train(args):
         final_div_factor=1e4,
     )
     output = Path(args.output_dir)
+    start_epoch = 0
+    step = 0
+    resume_payload = None
+    if args.resume:
+        resume_path = Path(args.resume)
+        resume_payload = torch.load(str(resume_path), map_location="cpu")
+        if not isinstance(resume_payload, dict) or "optimizer" not in resume_payload or "scheduler" not in resume_payload:
+            raise RuntimeError("resume checkpoint must contain model, optimizer, and scheduler state")
+        model.module.load_state_dict(resume_payload["model"], strict=True)
+        optimizer.load_state_dict(resume_payload["optimizer"])
+        if int(resume_payload["scheduler"].get("total_steps", -1)) != total_steps:
+            raise RuntimeError("resume scheduler total_steps disagrees with the requested formal epoch budget")
+        scheduler.load_state_dict(resume_payload["scheduler"])
+        start_epoch, step = int(resume_payload["epoch"]), int(resume_payload["step"])
     if rank == 0:
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True, exist_ok=bool(args.resume))
+        provenance.update({"dataset_samples": len(dataset), "steps_per_epoch": len(loader),
+                           "per_rank_batch": args.batch_size, "global_batch": args.batch_size * world_size,
+                           "workers_per_rank": args.workers, "initial_lr": args.lr, "max_lr": args.max_lr,
+                           "init_checkpoint_sha256": _sha256_file(init_weights),
+                           "init_kind": "phase-a-model" if full_model_init else "detector"})
+        if args.resume:
+            provenance["resume_checkpoint_sha256"] = _sha256_file(args.resume)
         (output / "config.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
+        if args.resume:
+            _trim_csv_after_checkpoint(output / "metrics.csv", step)
     dist.barrier()
-    step, started, last = 0, time.monotonic(), None
-    for epoch in range(args.epochs):
+    started, last = time.monotonic(), None
+    run_start_step = step
+    global_samples = int(resume_payload.get("global_samples", step * args.batch_size * world_size)) if resume_payload else 0
+    for epoch in range(start_epoch, args.epochs):
         sampler.set_epoch(epoch)
+        epoch_totals = np.zeros(len(LOSS_KEYS) + 1, dtype=np.float64)
+        epoch_count = 0
+        log_totals = np.zeros(len(LOSS_KEYS) + 1, dtype=np.float64)
+        log_count = 0
         for batch in loader:
             batch = to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -223,20 +294,63 @@ def train(args):
             optimizer.step()
             scheduler.step()
             state = state.detached()
-            values = torch.stack([loss[key].detach().float() for key in LOSS_KEYS])
-            if not torch.isfinite(values).all():
-                raise FloatingPointError("non-finite DualCMP loss")
-            dist.all_reduce(values, op=dist.ReduceOp.SUM)
-            last = (values / world_size).cpu().tolist()
+            local_batch = len(batch["scene_receiver_keys"])
+            global_totals, global_count = _global_loss(loss, local_batch, device)
+            last = [value / global_count for value in global_totals]
+            epoch_totals += np.asarray(global_totals)
+            epoch_count += global_count
+            log_totals += np.asarray(global_totals)
+            log_count += global_count
             step += 1
+            global_samples += global_count
+            if step % args.log_every == 0:
+                if rank == 0:
+                    row = dict(zip(LOSS_KEYS + ("L_total",), [value / log_count for value in log_totals]))
+                    row.update({"kind": "step", "split": "train", "epoch": epoch + 1, "global_step": step,
+                                "global_samples": global_samples, "lr_trunk": optimizer.param_groups[0]["lr"],
+                                "lr_heads": optimizer.param_groups[1]["lr"]})
+                    _append_csv(output / "metrics.csv", row)
+                    print(json.dumps(row), flush=True)
+                log_totals[:] = 0.0
+                log_count = 0
             if args.max_steps and step >= args.max_steps:
                 break
+        if log_count and rank == 0:
+            row = dict(zip(LOSS_KEYS + ("L_total",), [value / log_count for value in log_totals]))
+            row.update({"kind": "step", "split": "train", "epoch": epoch + 1, "global_step": step,
+                        "global_samples": global_samples, "lr_trunk": optimizer.param_groups[0]["lr"],
+                        "lr_heads": optimizer.param_groups[1]["lr"]})
+            _append_csv(output / "metrics.csv", row)
+            print(json.dumps(row), flush=True)
         if args.max_steps and step >= args.max_steps:
             break
-        if rank == 0 and args.save_every and (epoch + 1) % args.save_every == 0:
-            torch.save({"model": model.module.state_dict(), "epoch": epoch + 1,
-                        "step": step, "provenance": provenance},
-                       output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
+        epoch_row = dict(zip(LOSS_KEYS + ("L_total",), [value / epoch_count for value in epoch_totals]))
+        epoch_row.update({"kind": "epoch", "split": "train+test", "epoch": epoch + 1, "global_step": step,
+                          "global_samples": global_samples, "lr_trunk": optimizer.param_groups[0]["lr"],
+                          "lr_heads": optimizer.param_groups[1]["lr"]})
+        checkpoint_payload = {"model": model.module.state_dict(), "optimizer": optimizer.state_dict(),
+                              "scheduler": scheduler.state_dict(), "epoch": epoch + 1, "step": step,
+                              "global_samples": global_samples, "provenance": provenance}
+        if rank == 0:
+            if args.save_every and (epoch + 1) % args.save_every == 0:
+                _atomic_save(checkpoint_payload, output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
+            _atomic_save(checkpoint_payload, output / "checkpoint.pt")
+        dist.barrier()
+        if (epoch + 1) % args.eval_every == 0:
+            test_report = evaluate_tracking_model_ddp(model, hypes, device, os.environ["V2V4REAL_ROOT"],
+                                                      os.environ["DUALCMP_TRACKING_LABEL_ROOT"])
+            if rank == 0:
+                metrics = test_report["metrics"]
+                epoch_row.update({"test_MOTA": metrics["MOTA"], "test_AMOTA": metrics["AMOTA"],
+                                  "test_sAMOTA": metrics["sAMOTA"], "test_recall": metrics["tracking_recall"],
+                                  "test_precision": metrics["tracking_precision"], "test_IDS": metrics["identity_switches"],
+                                  "test_fragments": metrics["fragments"], "test_overall_pass": test_report["audit"]["overall_pass"]})
+                (output / ("test_metrics_epoch_%03d.json" % (epoch + 1))).write_text(json.dumps(test_report, indent=2), encoding="utf-8")
+        if rank == 0:
+            _append_csv(output / "metrics.csv", epoch_row)
+            print(json.dumps(epoch_row), flush=True)
+        if args.stop_after_epoch and epoch + 1 >= args.stop_after_epoch:
+            break
     _assert_sync(model.module)
     peak_memory = torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
     elapsed = time.monotonic() - started
@@ -250,9 +364,10 @@ def train(args):
                        "sequence_augmentation": args.full_data,
                        "init_checkpoint_sha256": _sha256_file(init_weights),
                        "init_kind": "phase-a-model" if full_model_init else "detector"})
-    report = {"steps": step, "loss": dict(zip(LOSS_KEYS, last or [])),
+    report = {"steps": step,
+              "loss": dict(zip(LOSS_KEYS + ("L_total",), last or [])),
               "provenance": provenance, "peak_memory_mib": peak_memory,
-              "clips_per_second_per_rank": step * args.batch_size / max(elapsed, 1e-9),
+              "clips_per_second_per_rank": (step - run_start_step) * args.batch_size / max(elapsed, 1e-9),
               "scheduler": "JDT3D-one-cycle-cosine",
               "steps_per_epoch": len(loader), "scheduler_total_steps": total_steps,
               "cosine_rise_fraction": 0.4,
@@ -260,9 +375,9 @@ def train(args):
               "last_grad_norm": float(grad_norm), "ddp_sync": True}
     if rank == 0:
         checkpoint = output / "checkpoint.pt"
-        torch.save({"model": model.module.state_dict(), "epoch": epoch,
-                    "step": step, "provenance": provenance}, checkpoint)
-        report["checkpoint_sha256"] = _sha256_file(checkpoint)
+        report["checkpoint_sha256"] = (
+            _sha256_file(checkpoint) if checkpoint.is_file() else None
+        )
         (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
     dist.barrier()
@@ -285,7 +400,11 @@ def main():
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--full-data", action="store_true")
     parser.add_argument("--data-split", choices=("train", "val", "test"), default="train")
-    parser.add_argument("--save-every", type=int, default=4)
+    parser.add_argument("--save-every", type=int, default=1)
+    parser.add_argument("--eval-every", type=int, default=1)
+    parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--resume")
+    parser.add_argument("--stop-after-epoch", type=int, default=0)
     parser.add_argument("--dirty-smoke", action="store_true")
     parser.add_argument("--amp", action="store_true")
     train(parser.parse_args())
