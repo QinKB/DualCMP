@@ -2,6 +2,10 @@
 
 ## Current
 
+- Phase-C joint integration is implemented and full-data launch schedules are
+  frozen from local upstream configs: Phase A 20 epochs, Phase B 30 epochs,
+  Phase C 20 epochs. Formal Phase A is the next running job; Phase B starts
+  only after its fresh tracking evaluation.
 - Phase B is functionally accepted at clean commit `d2ee211`: official MTR
   initialization, source-preserved evidence, main+dense loss, global DDP
   normalization, frozen tracker, fresh forecast metrics and tracking
@@ -59,11 +63,14 @@
 
 ## Open
 
-- Start Phase C only after freezing its joint-loss weights, trainable modules,
-  small-sample gate and matched detection/tracking/forecast acceptance.
+- Run full Phase A on 14,018 T=3 clips with B4/GPU, W8/GPU and the JDT3D
+  20-epoch one-cycle schedule; then evaluate and run full Phase B for 30 epochs.
 
 ## Risks
 
+- The only standalone local CMP detector checkpoint is a structurally
+  incompatible 256x model. Formal Phase A therefore resumes the accepted 32x
+  Phase-A checkpoint rather than using a partial or non-strict load.
 - Current one-token tracker attention is not the full Sparse4D temporal
   attention and must not be described as such.
 - Learned-box second KF update is a project adaptation, not a verbatim
@@ -84,3 +91,4 @@
 | CP-20260901-04 | `5f84817` | source-preserved forecast preflight | two-GPU run12 + fresh CMP metrics | 800-step overfit |
 | CP-20260901-05 | `fd9189c` | restore fixed CoLIF/CMP heading boundary | two-GPU smoke + fresh CMP eval | 800-step result |
 | CP-20260901-06 | `d2ee211` | official-aligned Phase-B code | global-loss/freeze smoke + clean 800-step gate | Phase C |
+| CP-20260902-01 | pending | full-data Phase A/B and Phase-C joint integration | two-GPU epoch-schedule preflights | Phase A 20 epochs |

@@ -50,11 +50,28 @@ def _checkpoint_provenance(checkpoint, payload=None, allow_dirty_smoke=False):
     if provenance.get("source_state") == "dirty-smoke":
         if not allow_dirty_smoke:
             raise RuntimeError("dirty-smoke checkpoint requires explicit allow_dirty_smoke")
-        from opencood.tools.dualcmp.train_forecast_ddp import _provenance
+        is_joint = "init_checkpoint_sha256" in provenance
+        if is_joint:
+            from opencood.tools.dualcmp.train_joint_ddp import _provenance
+        else:
+            from opencood.tools.dualcmp.train_forecast_ddp import _provenance
         current = _provenance()
-        if current.get("source_state") != "dirty-smoke" or any(provenance.get(key) != current.get(key) for key in ("base_sha", "source_tree_sha256", "protocol_sha256")):
+        checkpoint_protocol = provenance.get("protocol_sha256")
+        if checkpoint_protocol is None and is_joint:
+            checkpoint_protocol = provenance.get("init_provenance", {}).get(
+                "protocol_sha256"
+            )
+        current_protocol = _protocol_sha256()
+        if (
+            current.get("source_state") != "dirty-smoke"
+            or any(
+                provenance.get(key) != current.get(key)
+                for key in ("base_sha", "source_tree_sha256")
+            )
+            or checkpoint_protocol != current_protocol
+        ):
             raise RuntimeError("dirty-smoke checkpoint source manifest does not match current task sources")
-        return {"checkpoint_sha256": _sha256_file(checkpoint), "source_state": "dirty-smoke", "base_sha": provenance["base_sha"], "source_tree_sha256": provenance["source_tree_sha256"], "checkpoint_protocol_sha256": provenance["protocol_sha256"], "current_protocol_sha256": _protocol_sha256()}
+        return {"checkpoint_sha256": _sha256_file(checkpoint), "source_state": "dirty-smoke", "base_sha": provenance["base_sha"], "source_tree_sha256": provenance["source_tree_sha256"], "checkpoint_protocol_sha256": checkpoint_protocol, "current_protocol_sha256": current_protocol}
     source_sha = provenance.get("source_sha")
     protocol_sha = provenance.get("protocol_sha256")
     if not isinstance(source_sha, str) or not _SHA1_RE.match(source_sha):

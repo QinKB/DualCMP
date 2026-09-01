@@ -40,6 +40,12 @@
 
 ## Open
 
+- Formal schedules are source-backed and epoch-based: Phase A uses JDT3D's
+  20-epoch T=3 one-cycle cosine; Phase B uses CMP/MTR's 30 epochs and
+  22/24/26/28 milestones; Phase C uses UniAD/UniV2X's 20-epoch warmup-cosine.
+- Full-data gates passed with Phase A 14,018 clips, B4/W8, 1,752 steps/epoch,
+  20.35 GiB/GPU; and Phase B 12,930 clips, B4/W8, 1,616 steps/epoch,
+  6.26 GiB/GPU. `--max-steps` no longer changes a full-data scheduler.
 - Phase B is complete at clean source `d2ee211`; canonical artifacts are under
   `runs/train-official-global-s20260901`. Coverage is 94 assigned/92 eligible;
   the two one-history-step newborns remain explicitly uncovered.
@@ -48,6 +54,8 @@
   MOTA/recall/precision/IDS/fragments, while its older independent
   `overall_pass=false` remains truthful.
 - The next open work is Phase C joint fine-tuning, not more Phase-B tuning.
+- The next execution is formal full-data Phase A, followed by Phase B; Phase C
+  follows only after both fresh evaluators pass.
 
 ## Phase-B failure lessons
 

@@ -105,7 +105,8 @@ class DualCmpClipModel(nn.Module):
         )
 
     def forward(self, runtime_frames, state=None, max_dt_s=0.2,
-                detector_autocast=False, run_forecast=False):
+                detector_autocast=False, run_forecast=False,
+                current_frame_only_grad=False):
         """Advance only from runtime frames; actor state remains FP32.
 
         ``detector_autocast`` deliberately encloses the dense detector only.
@@ -116,8 +117,13 @@ class DualCmpClipModel(nn.Module):
         if run_forecast and self.forecast_head is None:
             raise RuntimeError("run_forecast requires an opt-in forecast head")
         for frame_index, frame in enumerate(runtime_frames):
-            with autocast(enabled=bool(detector_autocast)):
-                detector = self.detector(frame)
+            warmup_no_grad = bool(
+                current_frame_only_grad
+                and frame_index < len(runtime_frames) - 1
+            )
+            with torch.set_grad_enabled(torch.is_grad_enabled() and not warmup_no_grad):
+                with autocast(enabled=bool(detector_autocast)):
+                    detector = self.detector(frame)
             # AB3DMOT proposal decoding and the repository detection loss
             # allocate FP32 anchors/targets; leave the AMP region before both.
             detector["psm"] = detector["psm"].float()
@@ -140,14 +146,15 @@ class DualCmpClipModel(nn.Module):
                 state = self.tracker(state, proposals, pose, time_s, max_dt_s)
             detector["proposals"] = proposals
             detector["state"] = state
-            detector["roi_feature"] = self.roi(detector["fused_bev"], state.box)
-            detector["temporal_feature"] = self.temporal_fuse(
-                self.temporal_attention, detector["roi_feature"], state.feature,
-                state.valid_mask)
-            update = self.track_update(detector["temporal_feature"])
-            detector["track_exist_logits"] = self.track_exist(update).squeeze(-1)
-            detector["track_box"] = state.box + self.track_box(update)
-            detector["track_velocity"] = state.velocity + self.track_velocity(update)
+            with torch.set_grad_enabled(torch.is_grad_enabled() and not warmup_no_grad):
+                detector["roi_feature"] = self.roi(detector["fused_bev"], state.box)
+                detector["temporal_feature"] = self.temporal_fuse(
+                    self.temporal_attention, detector["roi_feature"], state.feature,
+                    state.valid_mask)
+                update = self.track_update(detector["temporal_feature"])
+                detector["track_exist_logits"] = self.track_exist(update).squeeze(-1)
+                detector["track_box"] = state.box + self.track_box(update)
+                detector["track_velocity"] = state.velocity + self.track_velocity(update)
             quality = detector["track_exist_logits"].sigmoid()
             state = self.apply_learned_update(
                 state, update, detector["track_box"], detector["track_velocity"],
@@ -155,8 +162,14 @@ class DualCmpClipModel(nn.Module):
             state.validate()
             detector["state"] = state
             if run_forecast and frame_index == len(runtime_frames) - 1:
+                # A view keeps the forecast branch observable without copying
+                # the dense tensor; its retained gradient excludes the fused
+                # detection/tracking branch that also consumes source_bev.
+                forecast_source_bev = detector["source_bev"].view_as(
+                    detector["source_bev"]
+                )
                 evidence = self.actor_source_tokenizer(
-                    detector["source_bev"], detector["source_mask"], state.box,
+                    forecast_source_bev, detector["source_mask"], state.box,
                     state.active_mask)
                 forecast = self.forecast_head(
                     # Tracker latent must not be forecast input; source tokens
@@ -168,6 +181,7 @@ class DualCmpClipModel(nn.Module):
                     source_tokens=evidence["tokens"], source_positions=evidence["positions"],
                     source_token_mask=evidence["token_mask"])
                 detector["forecast"] = forecast
+                detector["forecast_source_bev"] = forecast_source_bev
             outputs.append(detector)
             # Phase-B uses ten causal tracking warmup frames only to build
             # capture-native history.  It never performs eleven-frame

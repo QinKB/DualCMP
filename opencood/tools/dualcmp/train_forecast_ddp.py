@@ -94,7 +94,7 @@ def _provenance():
     }
 
 
-def _hypes(path):
+def _hypes(path, args=None):
     root, labels, tracker_weights, mtr_weights = (
         os.environ.get(key)
         for key in (
@@ -109,8 +109,10 @@ def _hypes(path):
             "V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, "
             "DUALCMP_TRACKER_WEIGHTS, and DUALCMP_MTR_WEIGHTS are required"
         )
+    full_data = bool(args is not None and args.full_data)
+    split = args.data_split if full_data else "test"
     h = load_yaml(path)
-    h["root_dir"] = str(Path(root) / "test")
+    h["root_dir"] = str(Path(root) / split)
     h["validate_dir"] = h["root_dir"]
     h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
     h["fusion"] = {
@@ -124,11 +126,17 @@ def _hypes(path):
             "receiver_ids": [0, 1],
             "max_actors": 128,
             "max_cav": 2,
-            "tracking_label_root": labels,
-            "window": list(FORECAST_WINDOW),
             "shuffle_training_points": False,
         }
     }
+    if full_data:
+        h["fusion"]["args"]["split_name"] = split
+        if split == "test":
+            h["fusion"]["args"]["tracking_label_root"] = labels
+    else:
+        h["fusion"]["args"].update({
+            "tracking_label_root": labels, "window": list(FORECAST_WINDOW),
+        })
     return h, tracker_weights, mtr_weights
 
 
@@ -140,10 +148,14 @@ def main():
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--max-steps", type=int, default=0)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--full-data", action="store_true")
+    parser.add_argument("--data-split", choices=("train", "val", "test"),
+                        default="train")
+    parser.add_argument("--save-every", type=int, default=5)
     args = parser.parse_args()
     random.seed(20260901)
     np.random.seed(20260901)
@@ -155,9 +167,9 @@ def main():
     rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    h, tracker_weights, mtr_weights = _hypes(args.hypes)
+    h, tracker_weights, mtr_weights = _hypes(args.hypes, args)
     dataset = DualCMPSequenceDataset(h, train=True)
-    if len(dataset) != FORECAST_SAMPLES:
+    if not args.full_data and len(dataset) != FORECAST_SAMPLES:
         raise RuntimeError("forecast protocol requires exactly 16 samples")
     _, loader, sampler = build_dataloader(
         dataset,
@@ -257,7 +269,10 @@ def main():
         lr=args.lr,
         weight_decay=0.01,
     )
-    total_budget_steps = args.max_steps or args.epochs * len(loader)
+    total_budget_steps = (
+        args.epochs * len(loader)
+        if args.full_data else (args.max_steps or args.epochs * len(loader))
+    )
     decay_steps = [
         round(total_budget_steps * epoch / 30.0) for epoch in (22, 24, 26, 28)
     ]
@@ -323,6 +338,12 @@ def main():
                 break
         if args.max_steps and step >= args.max_steps:
             break
+        if rank == 0 and args.save_every and (epoch + 1) % args.save_every == 0:
+            torch.save(
+                {"model": model.module.state_dict(), "epoch": epoch + 1,
+                 "step": step, "provenance": _provenance()},
+                output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)),
+            )
         epoch += 1
         if not args.max_steps and epoch >= args.epochs:
             break
@@ -339,6 +360,8 @@ def main():
     elapsed = max(time.monotonic() - started, 1e-9)
     report = {
         "steps": step,
+        "epochs_completed": epoch,
+        "dataset_samples": len(dataset),
         "loss": last,
         "per_rank_batch": args.batch_size,
         "global_batch": args.batch_size * 2,

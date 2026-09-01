@@ -108,3 +108,16 @@
 - Tracking regression: MOTA `0.961`, recall `0.9705`, precision `1.0`, IDS `9`,
   fragments `24`, matching Phase A. The original tracker threshold gate remains
   `overall_pass=false`; forecast integration did not rewrite it.
+
+## 2026-09-02 — Joint integration and formal epoch schedules
+
+- Implemented current-frame Phase-C joint gradients, two-GPU tracking eval,
+  full-data Phase-A/B entries and clip-consistent sequence augmentation copied
+  from OpenCOOD/JDT3D semantics.
+- Local-source schedules: Phase A JDT3D 20-epoch one-cycle; Phase B CMP/MTR
+  30-epoch milestones; Phase C UniAD/UniV2X 20-epoch warmup-cosine.
+- Full-data preflight passed: Phase A 14,018 clips, B4/W8, 1,752 steps/epoch,
+  20.35 GiB/GPU; Phase B 12,930 clips, B4/W8, 1,616 steps/epoch, 6.26 GiB/GPU.
+- Joint 100-step calibration rejected base LR `1e-4`; base `1e-5` improved
+  tracking while retaining reasonable forecast metrics. Formal Phase C keeps
+  that LR with 500-step warmup and cosine decay.

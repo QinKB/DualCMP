@@ -22,6 +22,7 @@ from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_index import SceneSe
 from opencood.data_utils.v2v4real.datasets.dualcmp_target_builder import CausalTargetBuilder, source_to_receiver_transform
 from opencood.data_utils.v2v4real.pre_processor import build_preprocessor
 from opencood.data_utils.v2v4real.post_processor import build_postprocessor
+from opencood.data_utils.v2v4real.augmentor.data_augmentor import DataAugmentor
 from opencood.utils import box_utils_v2v4real
 from opencood.utils.pcd_utils import mask_ego_points, mask_points_by_range, pcd_to_np, shuffle_points
 
@@ -81,6 +82,13 @@ class DualCMPSequenceDataset(Dataset):
         if self.max_actors < 1 or self.max_cav < 1:
             raise ValueError("max_actors/max_cav must be positive")
         self.shuffle_training_points = bool(args.get("shuffle_training_points", True))
+        self.sequence_augmentation = bool(
+            self.train and args.get("sequence_augmentation", False)
+        )
+        self.data_augmentor = DataAugmentor(
+            params.get("data_augment", []), train=self.sequence_augmentation,
+            intermediate=True,
+        )
         self.lidar_range = params["preprocess"]["cav_lidar_range"]
         self.pre_processor = build_preprocessor(params["preprocess"], train=self.train)
         self.post_processor = build_postprocessor(params["postprocess"], train=self.train) if not self.runtime_only else None
@@ -155,8 +163,59 @@ class DualCMPSequenceDataset(Dataset):
     def _source_ids(self, scene_id: str, receiver_id: str) -> Tuple[str, ...]:
         return tuple([receiver_id] + [source for source in self.index.source_ids(scene_id) if source != receiver_id])[:self.max_cav]
 
+    def _sample_augmentation(self):
+        if not self.sequence_augmentation:
+            return None
+        flip, rotation, scale = [None, None, None], None, None
+        for config in self.params.get("data_augment", []):
+            if config["NAME"] == "random_world_flip":
+                for index, _ in enumerate(config["ALONG_AXIS_LIST"]):
+                    flip[index] = bool(np.random.choice([False, True]))
+            elif config["NAME"] == "random_world_rotation":
+                limits = config["WORLD_ROT_ANGLE"]
+                limits = limits if isinstance(limits, list) else [-limits, limits]
+                rotation = float(np.random.uniform(limits[0], limits[1]))
+            elif config["NAME"] == "random_world_scaling":
+                limits = config["WORLD_SCALE_RANGE"]
+                scale = float(np.random.uniform(limits[0], limits[1]))
+        augmentation = {"flip": flip, "noise_rotation": rotation,
+                        "noise_scale": scale}
+        basis = np.asarray(
+            [[0, 0, 0, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]],
+            dtype=np.float32,
+        )
+        transformed, _ = self._augment_points_boxes(
+            basis, np.zeros((0, 7), dtype=np.float32), augmentation
+        )
+        matrix = np.eye(4, dtype=np.float32)
+        matrix[:3, :3] = (transformed[1:, :3] - transformed[0, :3]).T
+        augmentation["matrix"] = matrix
+        return augmentation
+
+    def _augment_points_boxes(self, points, boxes, augmentation):
+        if augmentation is None:
+            return points, boxes
+        result = self.data_augmentor.forward({
+            "lidar_np": np.asarray(points, dtype=np.float32).copy(),
+            "object_bbx_center": np.asarray(boxes, dtype=np.float32).copy(),
+            "object_bbx_mask": np.ones(len(boxes), dtype=np.float32),
+            "flip": augmentation["flip"],
+            "noise_rotation": augmentation["noise_rotation"],
+            "noise_scale": augmentation["noise_scale"],
+        })
+        return result["lidar_np"], result["object_bbx_center"]
+
+    @staticmethod
+    def _augmented_receiver_pose(receiver_pose, anchor_pose, augmentation):
+        if augmentation is None:
+            return receiver_pose
+        matrix = augmentation["matrix"].astype(np.float64)
+        virtual = matrix @ np.linalg.inv(anchor_pose) @ receiver_pose @ np.linalg.inv(matrix)
+        return virtual.astype(np.float32)
+
     def _load_capture(self, record: SourceFrameRecord, receiver_id: str,
-                      receiver_pose: np.ndarray, slot: int, delay_s: float) -> Optional[dict]:
+                      receiver_pose: np.ndarray, slot: int, delay_s: float,
+                      augmentation=None) -> Optional[dict]:
         source_yaml = _load_yaml_cached(str(record.yaml_path))
         source_pose = np.asarray(source_yaml["lidar_pose"], dtype=np.float32)
         points = pcd_to_np(str(record.lidar_path))
@@ -165,6 +224,9 @@ class DualCMPSequenceDataset(Dataset):
         transform = source_to_receiver_transform(source_pose, receiver_pose)
         points = points.copy()
         points[:, :3] = box_utils_v2v4real.project_points_by_matrix_torch(points[:, :3], transform)
+        points, _ = self._augment_points_boxes(
+            points, np.zeros((0, 7), dtype=np.float32), augmentation
+        )
         points = mask_points_by_range(points, self.lidar_range)
         if not len(points): return None
         processed = self.pre_processor.preprocess(points)
@@ -172,19 +234,27 @@ class DualCMPSequenceDataset(Dataset):
         return {"source_id": _numeric_id(record.source_id), "source_slot": int(slot),
                 "capture_frame_idx": int(record.frame_index), "capture_time_s": float(record.capture_time_s),
                 "arrival_time_s": float(record.capture_time_s + delay_s), "source_pose": source_pose,
-                "source_to_receiver": transform, "processed_lidar": processed,
+                "source_to_receiver": (
+                    augmentation["matrix"] @ transform
+                    if augmentation is not None else transform
+                ), "processed_lidar": processed,
                 "delay_source": "receiver_current" if record.source_id == receiver_id else (
                     "partner_current" if delay_s == 0 else "synthetic_fixed")}
 
-    def _runtime_frame(self, scene_id: str, receiver_id: str, frame_key: str) -> dict:
+    def _runtime_frame(self, scene_id: str, receiver_id: str, frame_key: str,
+                       augmentation=None, anchor_pose=None) -> dict:
         receiver = self.index.receiver_record(scene_id, receiver_id, frame_key)
         receiver_pose, captures, unavailable = self._pose(receiver), [], []
+        if anchor_pose is None:
+            anchor_pose = receiver_pose
         for slot, source_id in enumerate(self._source_ids(scene_id, receiver_id)):
             delay_s = 0.0 if source_id == receiver_id else self.partner_delay_s
             record = self.index.source_record(scene_id, source_id, frame_key) if delay_s == 0 else self.index.latest_arrived_source_record(scene_id, receiver_id, source_id, frame_key, delay_s)
             if record is None:
                 unavailable.append(slot); continue
-            capture = self._load_capture(record, receiver_id, receiver_pose, slot, delay_s)
+            capture = self._load_capture(
+                record, receiver_id, receiver_pose, slot, delay_s, augmentation
+            )
             if capture is None:
                 unavailable.append(slot); continue
             capture["delta_t_s"] = float(receiver.capture_time_s - record.capture_time_s)
@@ -197,31 +267,50 @@ class DualCMPSequenceDataset(Dataset):
             raise RuntimeError("Receiver source slot 0 has no usable current LiDAR")
         runtime = {"scene_id": scene_id, "receiver_id": _numeric_id(receiver_id), "receiver_frame_key": frame_key,
                    "receiver_frame_idx": int(receiver.frame_index), "receiver_time_s": float(receiver.capture_time_s),
-                   "receiver_pose": receiver_pose, "pose_convention": "v2v4real_lidar_to_world_homogeneous_4x4",
+                   "receiver_pose": self._augmented_receiver_pose(
+                       receiver_pose, anchor_pose, augmentation
+                   ), "pose_convention": "v2v4real_lidar_to_world_homogeneous_4x4",
                    "configured_source_ids": tuple(_numeric_id(source) for source in self._source_ids(scene_id, receiver_id)),
                    "unavailable_source_slots": tuple(unavailable), "source_captures": captures}
         assert_runtime_is_supervision_free(runtime)
         return runtime
 
-    def _actors(self, scene_id: str, receiver_id: str, frame_key: str, receiver_pose: np.ndarray) -> dict:
+    def _actors(self, scene_id: str, receiver_id: str, frame_key: str,
+                receiver_pose: np.ndarray, augmentation=None) -> dict:
         if self.tracking_label_root is not None:
             reference = self.index.receiver_record(scene_id, "0", frame_key)
-            return self.target_builder.actors_from_tracking_labels(
+            actors = self.target_builder.actors_from_tracking_labels(
                 self.tracking_label_root, scene_id, receiver_id, int(frame_key),
                 self._pose(reference), receiver_pose)
-        record = self.index.receiver_record(scene_id, receiver_id, frame_key)
-        yaml_params = _load_yaml_cached(str(record.yaml_path))
-        return self.target_builder.actors_in_receiver(yaml_params, receiver_pose)
+        else:
+            record = self.index.receiver_record(scene_id, receiver_id, frame_key)
+            yaml_params = _load_yaml_cached(str(record.yaml_path))
+            actors = self.target_builder.actors_in_receiver(yaml_params, receiver_pose)
+        if augmentation is None or not actors:
+            return actors
+        actor_ids = sorted(actors)
+        _, boxes = self._augment_points_boxes(
+            np.zeros((0, 4), dtype=np.float32),
+            np.stack([actors[actor_id] for actor_id in actor_ids]), augmentation,
+        )
+        return {actor_id: boxes[index] for index, actor_id in enumerate(actor_ids)}
 
-    def _target_frame(self, scene_id: str, receiver_id: str, frame_key: str, previous_key: Optional[str], include_future: bool) -> dict:
+    def _target_frame(self, scene_id: str, receiver_id: str, frame_key: str,
+                      previous_key: Optional[str], include_future: bool,
+                      augmentation=None) -> dict:
         receiver = self.index.receiver_record(scene_id, receiver_id, frame_key)
-        current = self._actors(scene_id, receiver_id, frame_key, self._pose(receiver))
+        current = self._actors(
+            scene_id, receiver_id, frame_key, self._pose(receiver), augmentation
+        )
         previous = None
         if previous_key is not None:
             previous_record = self.index.receiver_record(scene_id, receiver_id, previous_key)
             # Reproject the previous YAML from its own receiver pose into the
             # current receiver frame; do not compare coordinates in two egos.
-            previous = self._actors(scene_id, receiver_id, previous_key, self._pose(receiver))
+            previous = self._actors(
+                scene_id, receiver_id, previous_key, self._pose(receiver),
+                augmentation,
+            )
             dt_s = receiver.capture_time_s - previous_record.capture_time_s
             if dt_s <= 0:
                 raise ValueError("Causal velocity requires strictly increasing receiver times")
@@ -239,7 +328,10 @@ class DualCMPSequenceDataset(Dataset):
                 future_receiver = self.index.receiver_record(scene_id, receiver_id, future_key)
                 # CoLIF _receiver_forecast_target: each future target remains
                 # in its own receiver capture frame; this is target-only.
-                future = self._actors(scene_id, receiver_id, future_key, self._pose(future_receiver))
+                future = self._actors(
+                    scene_id, receiver_id, future_key,
+                    self._pose(future_receiver), augmentation,
+                )
                 for actor_index, actor_id in enumerate(current_ids):
                     if actor_id >= 0 and actor_id in future:
                         future_xy[actor_index, horizon] = future[actor_id][:2] - target["current_boxes"][actor_index, :2]
@@ -251,7 +343,16 @@ class DualCMPSequenceDataset(Dataset):
         clip = self.clip_records[index]
         keys = self.index.receiver_frame_keys(clip.scene_id, clip.receiver_id)
         selected = keys[clip.start_position: clip.start_position + self.clip_length]
-        runtime_frames = [self._runtime_frame(clip.scene_id, clip.receiver_id, key) for key in selected]
+        augmentation = self._sample_augmentation()
+        anchor_pose = self._pose(
+            self.index.receiver_record(clip.scene_id, clip.receiver_id, selected[0])
+        )
+        runtime_frames = [
+            self._runtime_frame(
+                clip.scene_id, clip.receiver_id, key, augmentation, anchor_pose
+            )
+            for key in selected
+        ]
         sample = {"scene_receiver_key": (clip.scene_id, _numeric_id(clip.receiver_id)), "runtime_frames": runtime_frames,
                   "loss_start_index": self.loss_start_index, "stage": self.stage}
         if not self.runtime_only:
@@ -260,7 +361,10 @@ class DualCMPSequenceDataset(Dataset):
             for position in target_positions:
                 absolute = clip.start_position + position
                 previous_key = keys[absolute - 1] if absolute > 0 else None
-                targets.append(self._target_frame(clip.scene_id, clip.receiver_id, selected[position], previous_key, self.stage == "forecast"))
+                targets.append(self._target_frame(
+                    clip.scene_id, clip.receiver_id, selected[position],
+                    previous_key, self.stage == "forecast", augmentation,
+                ))
             sample["target_frames"] = targets
         assert_runtime_is_supervision_free(runtime_frames)
         return sample

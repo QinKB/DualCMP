@@ -1,4 +1,4 @@
-"""Dedicated two-process DDP trainer for the fixed DualCMP T=3 protocol.
+"""Two-process Phase-A DDP trainer for fixed acceptance or full T=3 data.
 
 Launch only with ``torchrun --nproc_per_node=2``.  ``batch_size`` is clips per
 GPU; the frozen window below has 44 receiver-centric clips (22 per receiver).
@@ -10,13 +10,17 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
+import subprocess
 import sys
 import time
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 
 from opencood.data_utils.dualcmp_dataloader import build_dataloader
 from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_dataset import DualCMPSequenceDataset
@@ -69,23 +73,60 @@ def _init_distributed():
     return rank, local_rank, dist.get_world_size()
 
 
-def _hypes(path):
+def _hypes(path, args=None):
     root = os.environ.get("V2V4REAL_ROOT")
-    weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
+    phase_a_weights = os.environ.get("DUALCMP_PHASE_A_INIT_WEIGHTS")
+    detector_weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
     label_root = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
-    if not root or not weights or not label_root:
-        raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_DETECTOR_WEIGHTS, and DUALCMP_TRACKING_LABEL_ROOT are required")
+    full_data = bool(args is not None and args.full_data)
+    if not root or not (phase_a_weights or detector_weights) or (not full_data and not label_root):
+        raise EnvironmentError("V2V4REAL_ROOT and either DUALCMP_PHASE_A_INIT_WEIGHTS or DUALCMP_DETECTOR_WEIGHTS are required; fixed acceptance also requires DUALCMP_TRACKING_LABEL_ROOT")
+    if phase_a_weights and detector_weights:
+        raise EnvironmentError("set only one Phase-A initialization checkpoint")
+    split = args.data_split if full_data else "test"
     hypes = load_yaml(path)
-    hypes["root_dir"] = str(Path(root) / "test")
+    hypes["root_dir"] = str(Path(root) / split)
     hypes["validate_dir"] = hypes["root_dir"]
     hypes["model"]["args"]["compression"] = DETECTOR_COMPRESSION
     hypes["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
         "stage": "tracking", "tracking_frames": 3, "runtime_only": False,
         "runtime_forbid_gt": True, "receiver_ids": [0, 1], "frame_period_s": 0.1,
-        "max_actors": 128, "max_cav": 2, "window": list(WINDOW), "tracking_label_root": label_root,
-        "shuffle_training_points": False,
+        "max_actors": 128, "max_cav": 2,
+        "shuffle_training_points": full_data,
+        "sequence_augmentation": full_data,
     }}
-    return hypes, weights
+    if full_data:
+        hypes["fusion"]["args"]["split_name"] = split
+        if split == "test" and label_root:
+            hypes["fusion"]["args"]["tracking_label_root"] = label_root
+    else:
+        hypes["fusion"]["args"].update({
+            "window": list(WINDOW), "tracking_label_root": label_root,
+        })
+    return hypes, Path(phase_a_weights or detector_weights), bool(phase_a_weights)
+
+
+def _optimizer(model, initial_lr, max_lr, weight_decay):
+    trunk, heads = [], []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith("detector.") and not name.startswith(
+            ("detector.cls_head.", "detector.reg_head.")
+        ):
+            trunk.append(parameter)
+        else:
+            heads.append(parameter)
+    if not trunk or not heads:
+        raise RuntimeError("Phase-A optimizer groups are incomplete")
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": trunk, "lr": initial_lr * 0.1, "group_name": "trunk"},
+            {"params": heads, "lr": initial_lr, "group_name": "heads"},
+        ],
+        weight_decay=weight_decay, betas=(0.95, 0.99),
+    )
+    return optimizer, [max_lr * 0.1, max_lr]
 
 
 def _assert_sync(model):
@@ -103,21 +144,29 @@ def _assert_sync(model):
 
 
 def train(args):
-    _required_code_sha()
+    if not args.dirty_smoke:
+        _required_code_sha()
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     rank, local_rank, world_size = _init_distributed()
     device = torch.device("cuda", local_rank)
     gpu_names = [None for _ in range(world_size)]
     dist.all_gather_object(gpu_names, torch.cuda.get_device_name(local_rank))
-    provenance = _run_provenance(args, world_size, gpu_names)
-    hypes, detector_weights = _hypes(args.hypes)
+    provenance = _run_provenance(args, world_size, gpu_names) if not args.dirty_smoke else {
+        "source_state": "dirty-smoke", "base_sha": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parents[3])
+        ).decode().strip(), "protocol_sha256": _protocol_sha256(),
+        "argv": list(sys.argv), "world_size": world_size, "gpu_names": gpu_names,
+    }
+    hypes, init_weights, full_model_init = _hypes(args.hypes, args)
     dataset = DualCMPSequenceDataset(hypes, train=True)
     per_receiver = {entry["receiver_id"]: 0 for entry in WINDOW}
     for record in dataset.clip_records:
         per_receiver[int(record.receiver_id)] += 1
-    if (len(dataset) != TOTAL_CLIPS or
-            any(value != CLIPS_PER_RECEIVER for value in per_receiver.values())):
+    if (not args.full_data and (len(dataset) != TOTAL_CLIPS or
+            any(value != CLIPS_PER_RECEIVER for value in per_receiver.values()))):
         raise RuntimeError("fixed protocol requires 24 frames/22 clips per receiver and 44 total: %s" % per_receiver)
-    _, loader, sampler = build_dataloader(dataset, 1, True, workers=0, rank=rank,
+    _, loader, sampler = build_dataloader(dataset, args.batch_size, True, workers=args.workers, rank=rank,
                                            world_size=world_size, seed=args.seed,
                                            training=True, collate_fn=dataset.collate_batch_train,
                                            pin_memory=True)
@@ -128,12 +177,33 @@ def train(args):
         proposal_nms_thresh=hypes["postprocess"]["nms_thresh"],
         emission_threshold=hypes["postprocess"]["target_args"]["score_threshold"],
     ).to(device)
-    model.detector.load_state_dict(torch.load(detector_weights, map_location="cpu"), strict=True)
+    init_payload = torch.load(str(init_weights), map_location="cpu")
+    if full_model_init:
+        init_state = init_payload.get(
+            "model", init_payload.get("model_state_dict", init_payload)
+        )
+        init_state = {
+            (key[7:] if key.startswith("module.") else key): value
+            for key, value in init_state.items()
+        }
+        model.load_state_dict(init_state, strict=True)
+    else:
+        model.detector.load_state_dict(init_payload, strict=True)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                 broadcast_buffers=False)
     criterion = DualCmpLoss({"detector": hypes["loss"]["args"]}).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-10,
-                                 weight_decay=1e-4)
+    optimizer, max_lrs = _optimizer(
+        model.module, args.lr, args.max_lr, args.weight_decay
+    )
+    total_steps = (
+        args.epochs * len(loader)
+        if args.full_data else (args.max_steps or args.epochs * len(loader))
+    )
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=max_lrs, total_steps=total_steps, pct_start=0.4,
+        anneal_strategy="cos", div_factor=args.max_lr / args.lr,
+        final_div_factor=1e4,
+    )
     output = Path(args.output_dir)
     if rank == 0:
         output.mkdir(parents=True, exist_ok=False)
@@ -149,7 +219,9 @@ def train(args):
             outputs, state = model(batch["runtime_frames"], detector_autocast=args.amp)
             loss = criterion(outputs, batch["target_frames"])
             loss["total_loss"].backward()
+            grad_norm = clip_grad_norm_(model.parameters(), 35.0)
             optimizer.step()
+            scheduler.step()
             state = state.detached()
             values = torch.stack([loss[key].detach().float() for key in LOSS_KEYS])
             if not torch.isfinite(values).all():
@@ -161,17 +233,35 @@ def train(args):
                 break
         if args.max_steps and step >= args.max_steps:
             break
+        if rank == 0 and args.save_every and (epoch + 1) % args.save_every == 0:
+            torch.save({"model": model.module.state_dict(), "epoch": epoch + 1,
+                        "step": step, "provenance": provenance},
+                       output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
     _assert_sync(model.module)
     peak_memory = torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
     elapsed = time.monotonic() - started
+    provenance.update({"seed": args.seed, "epochs": args.epochs,
+                       "dataset_samples": len(dataset),
+                       "per_rank_batch": args.batch_size,
+                       "global_batch": args.batch_size * world_size,
+                       "workers_per_rank": args.workers,
+                       "initial_lr": args.lr, "max_lr": args.max_lr,
+                       "weight_decay": args.weight_decay,
+                       "sequence_augmentation": args.full_data,
+                       "init_checkpoint_sha256": _sha256_file(init_weights),
+                       "init_kind": "phase-a-model" if full_model_init else "detector"})
     report = {"steps": step, "loss": dict(zip(LOSS_KEYS, last or [])),
               "provenance": provenance, "peak_memory_mib": peak_memory,
-              "clips_per_second_per_rank": step / max(elapsed, 1e-9)}
+              "clips_per_second_per_rank": step * args.batch_size / max(elapsed, 1e-9),
+              "scheduler": "JDT3D-one-cycle-cosine",
+              "steps_per_epoch": len(loader), "scheduler_total_steps": total_steps,
+              "cosine_rise_fraction": 0.4,
+              "last_group_lrs": {group["group_name"]: group["lr"] for group in optimizer.param_groups},
+              "last_grad_norm": float(grad_norm), "ddp_sync": True}
     if rank == 0:
         checkpoint = output / "checkpoint.pt"
-        torch.save({"model": model.module.state_dict(), "epoch": epoch, "step": step,
-                    "provenance": {"source_sha": provenance["source_sha"],
-                                   "protocol_sha256": provenance["protocol_sha256"]}}, checkpoint)
+        torch.save({"model": model.module.state_dict(), "epoch": epoch,
+                    "step": step, "provenance": provenance}, checkpoint)
         report["checkpoint_sha256"] = _sha256_file(checkpoint)
         (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
@@ -183,10 +273,20 @@ def main():
     parser = argparse.ArgumentParser(description="two-process DualCMP T=3 DDP trainer")
     parser.add_argument("--hypes", default="opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml")
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260831)
-    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr", type=float, default=5e-5,
+                        help="JDT3D-aligned initial tracking-head LR")
+    parser.add_argument("--max-lr", type=float, default=5e-4)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="independent T=3 clips per GPU")
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--full-data", action="store_true")
+    parser.add_argument("--data-split", choices=("train", "val", "test"), default="train")
+    parser.add_argument("--save-every", type=int, default=4)
+    parser.add_argument("--dirty-smoke", action="store_true")
     parser.add_argument("--amp", action="store_true")
     train(parser.parse_args())
 
