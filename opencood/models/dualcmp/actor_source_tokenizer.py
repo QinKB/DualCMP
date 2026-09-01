@@ -46,9 +46,13 @@ class ActorAlignedSourceTokenizer(nn.Module):
         grid = torch.stack((2.0 * (receiver_x - self.x_min) / (self.x_max - self.x_min) - 1.0,
                             2.0 * (receiver_y - self.y_min) / (self.y_max - self.y_min) - 1.0), dim=-1)
         spatial_valid = (grid.abs() <= 1.0).all(dim=-1)
+        # Match CoLIF@6b8788e and the existing CMP intention-point file:
+        # physical BEV sampling uses radian boxes above, while MTR-local
+        # positional coordinates use its legacy degree-numeric heading.
         offset_x, offset_y = receiver_x - actor_boxes[..., 0, None], receiver_y - actor_boxes[..., 1, None]
-        position = torch.stack((torch.cos(yaw) * offset_x + torch.sin(yaw) * offset_y,
-                                -torch.sin(yaw) * offset_x + torch.cos(yaw) * offset_y,
+        decoder_heading = torch.rad2deg(yaw)
+        position = torch.stack((torch.cos(decoder_heading) * offset_x + torch.sin(decoder_heading) * offset_y,
+                                -torch.sin(decoder_heading) * offset_x + torch.cos(decoder_heading) * offset_y,
                                 torch.zeros_like(offset_x)), dim=-1)
         return grid, spatial_valid, position
 

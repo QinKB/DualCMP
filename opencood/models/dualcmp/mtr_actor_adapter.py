@@ -43,9 +43,12 @@ def pack_mtr_actor_polylines(
     """Build the released V2V4Real MTR 22-D actor representation.
 
     ``history_box`` stores every observation in the receiver-local frame of
-    its own capture.  It must not be replaced by the tracker's history
-    re-expressed in the current receiver frame.  Boxes remain
-    ``[x,y,z,h,w,l,yaw_rad]`` and all rotations are radians end-to-end.
+    its own capture, matching the released V2V4Real CMP cache.  It must not be
+    replaced by the tracker's history re-expressed in the current receiver
+    frame.  CoLIF boxes use ``[x,y,z,h,w,l,yaw_rad]``; CMP/MTR consumes
+    ``[x,y,z,l,w,h,heading_numeric]`` and its released V2V4Real path applies
+    trigonometric functions directly to degree-valued headings.  The legacy
+    conversion is deliberately confined to this adapter.
     """
 
     if boxes.ndim != 3 or boxes.shape[-1] != 7:
@@ -107,7 +110,7 @@ def pack_mtr_actor_polylines(
         size = int(slots.numel())
         center_box = boxes[batch_index, center_slot]
         center_heading = center_box[6]
-        decoder_heading = center_heading
+        decoder_heading = torch.rad2deg(center_heading)
         histories = history_box[batch_index, slots]
         mask = history_mask[batch_index, slots].bool()
 
@@ -117,7 +120,7 @@ def pack_mtr_actor_polylines(
         local_x = cosine * delta_xyz[..., 0] + sine * delta_xyz[..., 1]
         local_y = -sine * delta_xyz[..., 0] + cosine * delta_xyz[..., 1]
         local_xyz = torch.stack((local_x, local_y, delta_xyz[..., 2]), dim=-1)
-        relative_heading = histories[..., 6] - decoder_heading
+        relative_heading = torch.rad2deg(histories[..., 6]) - decoder_heading
 
         features = histories.new_zeros(size, time_count, 22)
         features[..., :3] = local_xyz

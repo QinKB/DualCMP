@@ -74,7 +74,11 @@ class DualCmpLoss(nn.Module):
                                        + target["future_xy"][valid_rows, gt_index]
                                        - output["track_box"][valid_rows, valid_slots, None, :2])
                     heading = output["track_box"][valid_rows, valid_slots, 6]
-                    cosine, sine = torch.cos(heading)[:, None], torch.sin(heading)[:, None]
+                    # CoLIF@6b8788e compatibility with the released V2V4Real
+                    # CMP intention points: tracking remains radians, but the
+                    # MTR-local target uses degree-numeric trigonometry.
+                    cmp_heading = torch.rad2deg(heading)
+                    cosine, sine = torch.cos(cmp_heading)[:, None], torch.sin(cmp_heading)[:, None]
                     future_actor = torch.stack((cosine * future_receiver[..., 0] + sine * future_receiver[..., 1],
                                                 -sine * future_receiver[..., 0] + cosine * future_receiver[..., 1]), dim=-1)
                     layer_scores = forecast["loss_pred_scores_layers"][valid_rows, valid_slots]
