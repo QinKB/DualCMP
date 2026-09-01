@@ -11,7 +11,11 @@ from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_dataset import (
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.loss.dualcmp_loss import update_identity_bindings
 from opencood.tools.dualcmp.forecast_metrics import cmp_metrics
-from opencood.tools.dualcmp.online import OnlineDualCMP, _model_from_checkpoint
+from opencood.tools.dualcmp.online import (
+    OnlineDualCMP,
+    _checkpoint_provenance,
+    _model_from_checkpoint,
+)
 from opencood.tools.dualcmp.protocol import (
     DETECTOR_COMPRESSION,
     FORECAST_WINDOW,
@@ -23,7 +27,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument("--disable-source-evidence", action="store_true")
     a = p.parse_args()
+    checkpoint_provenance = _checkpoint_provenance(
+        a.checkpoint, allow_dirty_smoke=True
+    )
     dist.init_process_group("nccl")
     rank, local = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local)
@@ -54,6 +62,7 @@ def main():
         "future_frames": 50,
         "modes": 6,
         "intention_points_file": "preprocessed_data/v2v4real/v2v4real_cluster_64_center_dict.pkl",
+        "source_evidence": not a.disable_source_evidence,
     }
     online = OnlineDualCMP(
         _model_from_checkpoint(
@@ -163,7 +172,14 @@ def main():
                 )
                 future = target["future_xy"][row, index].cpu().numpy()
                 velocity = target["current_velocity"][row, index].cpu().numpy()
-                rows.append((traj, future, mask, velocity))
+                track_center = (
+                    online._last_output["track_box"][row, actor, :2]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
+                gt_center = target["current_boxes"][row, index, :2].cpu().numpy()
+                rows.append((traj, future, mask, velocity, track_center, gt_center))
     gathered = [None, None]
     gathered_coverage = [None, None]
     dist.all_gather_object(gathered, rows)
@@ -173,6 +189,8 @@ def main():
         pred = [x[0] for x in rows]
         target = [x[1] for x in rows]
         mask = [x[2] for x in rows]
+        track_centers = [x[4] for x in rows]
+        gt_centers = [x[5] for x in rows]
         stationary = [np.zeros((6, 50, 2), np.float32) for _ in rows]
         cv = [
             np.repeat(
@@ -195,6 +213,7 @@ def main():
             digest.update((root / relative).read_bytes())
         coverage = [item for group in gathered_coverage for item in group]
         report = {
+            "checkpoint_provenance": checkpoint_provenance,
             "evaluator_tree_sha256": digest.hexdigest(),
             "coverage": coverage,
             "coverage_totals": {
@@ -206,7 +225,13 @@ def main():
                     item["eligible_complete"] for item in coverage
                 ),
             },
-            "model": cmp_metrics(pred, target, mask),
+            "model": cmp_metrics(
+                pred,
+                target,
+                mask,
+                prediction_centers=track_centers,
+                target_centers=gt_centers,
+            ),
             "stationary": cmp_metrics(stationary, target, mask),
             "cv": cmp_metrics(cv, target, mask),
         }

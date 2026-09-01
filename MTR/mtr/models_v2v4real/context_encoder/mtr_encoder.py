@@ -1,6 +1,8 @@
+from this import d
 import numpy as np
 import torch
 import torch.nn as nn
+from transformers import AutoImageProcessor, SwinModel
 
 from mtr.models_v2v4real.utils.transformer import transformer_encoder_layer, position_encoding_utils
 from mtr.models_v2v4real.utils import polyline_encoder
@@ -155,10 +157,10 @@ class MTREncoder(nn.Module):
               input_dict:
         """
         input_dict = batch_dict['input_dict']
-        obj_trajs, obj_trajs_mask = input_dict['obj_trajs'], input_dict['obj_trajs_mask']
+        obj_trajs, obj_trajs_mask = input_dict['obj_trajs'].cuda(), input_dict['obj_trajs_mask'].cuda() 
         # map_polylines = input_dict['map_polylines'].cuda()
         batch_sample_count = batch_dict['batch_sample_count']
-        obj_trajs_last_pos = input_dict['obj_trajs_last_pos']
+        obj_trajs_last_pos = input_dict['obj_trajs_last_pos'].cuda() 
         # map_polylines_center = input_dict['map_polylines_center'].cuda() 
         track_index_to_predict = input_dict['track_index_to_predict']
 

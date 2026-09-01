@@ -14,6 +14,7 @@ import subprocess
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 
 from opencood.data_utils.dualcmp_dataloader import build_dataloader
 from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_dataset import (
@@ -94,17 +95,19 @@ def _provenance():
 
 
 def _hypes(path):
-    root, labels, tracker_weights = (
+    root, labels, tracker_weights, mtr_weights = (
         os.environ.get(key)
         for key in (
             "V2V4REAL_ROOT",
             "DUALCMP_TRACKING_LABEL_ROOT",
             "DUALCMP_TRACKER_WEIGHTS",
+            "DUALCMP_MTR_WEIGHTS",
         )
     )
-    if not root or not labels or not tracker_weights:
+    if not root or not labels or not tracker_weights or not mtr_weights:
         raise EnvironmentError(
-            "V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, and DUALCMP_TRACKER_WEIGHTS are required"
+            "V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, "
+            "DUALCMP_TRACKER_WEIGHTS, and DUALCMP_MTR_WEIGHTS are required"
         )
     h = load_yaml(path)
     h["root_dir"] = str(Path(root) / "test")
@@ -126,7 +129,7 @@ def _hypes(path):
             "shuffle_training_points": False,
         }
     }
-    return h, tracker_weights
+    return h, tracker_weights, mtr_weights
 
 
 def main():
@@ -152,7 +155,7 @@ def main():
     rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    h, tracker_weights = _hypes(args.hypes)
+    h, tracker_weights, mtr_weights = _hypes(args.hypes)
     dataset = DualCMPSequenceDataset(h, train=True)
     if len(dataset) != FORECAST_SAMPLES:
         raise RuntimeError("forecast protocol requires exactly 16 samples")
@@ -194,15 +197,46 @@ def main():
             "Phase-A tracker checkpoint mismatch: missing=%s unexpected=%s"
             % (invalid, loaded.unexpected_keys)
         )
+    mtr_payload = torch.load(mtr_weights, map_location="cpu")
+    mtr_state = mtr_payload.get("model_state", mtr_payload)
+    context_prefix = "motion_transformer.context_encoder."
+    decoder_prefix = "motion_transformer.motion_decoder."
+    model.forecast_head.context_encoder.load_state_dict(
+        {
+            key[len(context_prefix) :]: value
+            for key, value in mtr_state.items()
+            if key.startswith(context_prefix)
+        },
+        strict=True,
+    )
+    model.forecast_head.decoder.load_state_dict(
+        {
+            key[len(decoder_prefix) :]: value
+            for key, value in mtr_state.items()
+            if key.startswith(decoder_prefix)
+        },
+        strict=True,
+    )
+    model.forecast_head.evidence_input_projection.load_state_dict(
+        model.forecast_head.decoder.in_proj_obj.state_dict(), strict=True
+    )
+    model.forecast_head.evidence_decoder_layers.load_state_dict(
+        model.forecast_head.decoder.obj_decoder_layers.state_dict(), strict=True
+    )
     for parameter in (
         list(model.detector.parameters())
         + list(model.tracker.parameters())
+        + list(model.temporal_attention.parameters())
         + list(model.track_update.parameters())
         + list(model.track_exist.parameters())
         + list(model.track_box.parameters())
         + list(model.track_velocity.parameters())
     ):
         parameter.requires_grad = False
+    frozen_temporal_attention = {
+        key: value.detach().cpu().clone()
+        for key, value in model.temporal_attention.state_dict().items()
+    }
     model.train()
     for module in (
         model.detector,
@@ -218,9 +252,24 @@ def main():
     model.forecast_head.train()
     model.actor_source_tokenizer.train()
     model = DDP(model, device_ids=[local_rank], broadcast_buffers=False)
-    optimizer = torch.optim.Adam(
-        [p for p in model.parameters() if p.requires_grad], lr=args.lr
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args.lr,
+        weight_decay=0.01,
     )
+    total_budget_steps = args.max_steps or args.epochs * len(loader)
+    decay_steps = [
+        round(total_budget_steps * epoch / 30.0) for epoch in (22, 24, 26, 28)
+    ]
+
+    def lr_multiplier(current_step):
+        decay = 1.0
+        for decay_step in decay_steps:
+            if current_step >= decay_step:
+                decay *= 0.5
+        return max(decay, 1e-6 / args.lr)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_multiplier)
     criterion = DualCmpLoss({"detector": h["loss"]["args"]}).to(device)
     output = Path(args.output_dir)
     if rank == 0:
@@ -229,6 +278,7 @@ def main():
     step = 0
     started = time.monotonic()
     last = None
+    last_local_forecast_counts = None
     epoch = 0
     while (not args.max_steps) or step < args.max_steps:
         sampler.set_epoch(epoch)
@@ -237,14 +287,37 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             outputs, _ = model(batch["runtime_frames"], run_forecast=True)
             loss = criterion([outputs[-1]], batch["target_frames"])
-            loss["total_loss"].backward()
+            global_counts = torch.stack(
+                (
+                    loss["C_gmm"],
+                    loss["C_mode"],
+                    loss["C_dense_gmm"],
+                )
+            ).detach()
+            last_local_forecast_counts = global_counts.cpu().tolist()
+            dist.all_reduce(global_counts, op=dist.ReduceOp.SUM)
+            forecast_loss = dist.get_world_size() * (
+                loss["S_gmm"] / global_counts[0].clamp_min(1.0)
+                + loss["S_mode"] / global_counts[1].clamp_min(1.0)
+                + loss["S_dense_gmm"] / global_counts[2].clamp_min(1.0)
+            )
+            forecast_loss.backward()
+            grad_norm = clip_grad_norm_(model.parameters(), 1000.0)
             optimizer.step()
-            values = torch.stack(
-                (loss["L_gmm"].detach(), loss["L_mode"].detach())
+            scheduler.step()
+            sums_and_counts = torch.stack(
+                (
+                    loss["S_gmm"].detach(), loss["C_gmm"],
+                    loss["S_mode"].detach(), loss["C_mode"],
+                    loss["S_dense_gmm"].detach(), loss["C_dense_gmm"],
+                )
             ).float()
-            dist.all_reduce(values, op=dist.ReduceOp.SUM)
-            values /= 2
-            last = {"L_gmm": float(values[0]), "L_mode": float(values[1])}
+            dist.all_reduce(sums_and_counts, op=dist.ReduceOp.SUM)
+            last = {
+                "L_gmm": float(sums_and_counts[0] / sums_and_counts[1].clamp_min(1.0)),
+                "L_mode": float(sums_and_counts[2] / sums_and_counts[3].clamp_min(1.0)),
+                "L_dense_gmm": float(sums_and_counts[4] / sums_and_counts[5].clamp_min(1.0)),
+            }
             step += 1
             if args.max_steps and step >= args.max_steps:
                 break
@@ -254,6 +327,15 @@ def main():
         if not args.max_steps and epoch >= args.epochs:
             break
     _assert_sync(model.module)
+    gathered_local_counts = [None for _ in range(dist.get_world_size())]
+    dist.all_gather_object(gathered_local_counts, last_local_forecast_counts)
+    if any(
+        not torch.equal(
+            value.detach().cpu(), frozen_temporal_attention[key]
+        )
+        for key, value in model.module.temporal_attention.state_dict().items()
+    ):
+        raise RuntimeError("Phase-B temporal attention changed while frozen")
     elapsed = max(time.monotonic() - started, 1e-9)
     report = {
         "steps": step,
@@ -265,6 +347,18 @@ def main():
         "clips_per_second_per_rank": step * args.batch_size / elapsed,
         "steps_per_second_per_rank": step / elapsed,
         "ddp_sync": True,
+        "optimizer": "AdamW",
+        "weight_decay": 0.01,
+        "grad_norm_clip": 1000.0,
+        "last_grad_norm": float(grad_norm),
+        "last_lr": float(optimizer.param_groups[0]["lr"]),
+        "lr_decay_steps": decay_steps,
+        "last_local_forecast_counts": gathered_local_counts,
+        "mtr_checkpoint_sha256": _sha256_file(mtr_weights),
+        "mtr_checkpoint_epoch": mtr_payload.get("epoch"),
+        "mtr_checkpoint_iter": mtr_payload.get("it"),
+        "evidence_initialization": "official_mtr_object_attention",
+        "temporal_attention_unchanged": True,
     }
     provenance = _provenance()
     provenance["phase_a_checkpoint_sha256"] = _sha256_file(tracker_weights)

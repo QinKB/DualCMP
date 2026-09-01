@@ -114,6 +114,7 @@ class IntentionQueryForecastHead(nn.Module):
             layer.capture_attention = True
 
         self.enabled = bool(args.get("enabled", True))
+        self.source_evidence_enabled = bool(args.get("source_evidence", True))
         self._unused_map_modules = [
             self.context_encoder.map_encoders,
             self.decoder.in_proj_map,
@@ -430,12 +431,18 @@ class IntentionQueryForecastHead(nn.Module):
                 consensus_token_mask,
                 "consensus",
             )
-            source = self._pack_evidence_memory(
-                packed.entries,
-                source_tokens.float() if source_tokens is not None else None,
-                source_positions.float() if source_positions is not None else None,
-                source_token_mask,
-                "source",
+            source = (
+                self._pack_evidence_memory(
+                    packed.entries,
+                    source_tokens.float() if source_tokens is not None else None,
+                    source_positions.float()
+                    if source_positions is not None
+                    else None,
+                    source_token_mask,
+                    "source",
+                )
+                if self.source_evidence_enabled
+                else None
             )
             combined = self._combine_evidence(consensus, source)
             attention_by_layer = {}
