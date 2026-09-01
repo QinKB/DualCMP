@@ -428,49 +428,154 @@ history + MTR intention queries -> source cross-attention -> multimodal forecast
 final -> joint perception + tracking + forecasting fine-tuning
 ```
 
-### Phase A：因果数据与跟踪闭环（进行中）
+### Phase A：因果数据与轻量 tracker（已允许进入 Phase B）
 
 已完成：
 
 - `(scene, receiver)` 的 T=3 真实 clip 和 B>1/DDP 数据契约；
 - runtime/target 隔离、evaluator-native label 和 receiver-1 -> CAV0 评估坐标；
 - tensor `ActorState`、AB3DMOT GIoU matching/lifecycle、DMSTrack Kalman 更新；
-- fused-BEV actor RoI、Sparse4D-style 同 slot temporal feature recurrence；
+- fused-BEV actor RoI、Sparse4D-style state cache/同 slot temporal update；
 - `forward -> loss -> backward -> optimizer -> checkpoint -> online inference -> metric` 路径已接通。
 
-未完成：
+进入 Phase B 的决策：
 
-- 用当前最新代码重新进行双 GPU、40 epoch、44 clips 过拟合；
-- 新 checkpoint 在冻结 2x24 帧上同时通过 tracking metric 和
-  birth/keep/delete/duplicate 门槛；
-- 失败时只依据真实 evaluator 失败项修复，不改冻结门槛。
+- 用户选择方案 1：保留原冻结跟踪验收的失败记录，不事后改门槛；
+- `train-track-bind-s20260831` 的 AMOTA=0.4834，高于本地 DMSTrack
+  V2V4Real 参考的 0.4352；轻量 tracker 作为模型接口继续使用；
+- 原 `AMOTA>=0.70` 与 IDS/keep/delete 门仍标记为未通过，不宣称 tracking
+  验收完成；
+- Phase B/C 不得让 tracker 回归；每次必须重跑同协议 tracking metric。
 
-### Phase B：Source-preserved forecasting（待 Phase A 通过）
+### Phase B：Source-preserved forecasting（已完成）
 
-直接复用：
+完整功能边界：
 
-- CMP/OpenCOOD `PointPillarCoBEVT` 产生的 `source_bev` 和 `fused_bev`；
-- 当前 `ActorAlignedSourceTokenizer` 的 actor-centered grid sampling；
-- CMP 的 V2V4Real MTR adapter/decoder/loss/metric；
-- MTR official intention query、GMM regression/NLL 和 trajectory NMS。
+```text
+runtime LiDAR
+-> PointPillarFax(source_bev, fused_bev)
+-> fused_bev lightweight tracker
+-> runtime actor box / ID / 11-frame causal box history
+-> actor-aligned per-source tokens [B,A,L,P,C]
+-> released CMP/MTR actor encoder and intention queries
+-> per-intention source cross-attention
+-> 6 x 50-step GMM trajectories
+-> CMP minADE/minFDE/MR evaluation
+```
 
-需要适配：
+Tracker 的 `feature` 只服务下一帧 tracking update，不作为 forecasting 输入。
 
-- tracker 的 runtime actor box/history 取代 AB3DMOT 预处理 trajectory 作为预测输入；
-- 在每个 source BEV 的同一 actor 位置取样，保留 `[B,A,L,C]`
-  source 维；
-- MTR motion intention query 形成后才 cross-attend source tokens，不提前
-  mean/max/gate 融合；
-- prediction 不反向写回 tracker。
+#### B0：11 帧因果 actor history
 
-功能验收：
+直接复制：
 
-- 真实 forecast item 含长因果 history 和 future target，runtime 仍无 GT/future；
-- 完成 `online tracking -> actor history/source tokens -> MTR loss -> backward -> checkpoint -> inference`；
-- source-token 和 intention cross-attention 梯度到达 per-CAV encoder feature；
-- 预先冻结的小子集过拟合 minADE/minFDE/MR 达标，不以 loss 下降代替。
+- CoLIF `opencood/models/colif/state.py` 的 `forecast_history_box/history_mask`
+  状态契约；
+- CoLIF `opencood/models/point_pillar_colif.py::select_mtr_history`；
+- CoLIF `opencood/models/colif/uniad_tracker/tracker.py::_append_forecast_history`
+  的 oldest-to-current 环形更新语义。
 
-### Phase C：联合微调（待 Phase B 通过）
+适配：
+
+- 在 `ActorState` 中保留 tracking 的 current-frame KF state，另存 11 帧
+  capture-native receiver-local `forecast_history_box`；
+- 不把历史全部重投影到当前 receiver，避免破坏 CMP/MTR 的移动
+  receiver 时间契约；
+- 因果 history 跨 online step 保留，长历史在训练边界 detach，不做
+  11-frame perception BPTT。
+
+#### B1：Actor-aligned source tokens
+
+直接复制：
+
+- CoLIF `opencood/models/colif/actor_source_tokenizer.py::`
+  `ActorAlignedSourceTokenizer` 整个实现和对应测试。
+
+适配：
+
+- 输入改为当前 `PointPillarFax` 的 `source_bev/source_mask`、tracker
+  `box/active_mask`；
+- 保留 source 和 RoI patch 维度 `[B,A,L,P,C]`，不做
+  mean/max/gate；
+- actor anchor 只来自 fused-BEV tracker，source token 不写回 tracker。
+
+#### B2：CMP/MTR intention-conditioned decoder
+
+直接复制：
+
+- CoLIF `opencood/models/colif/mtr_actor_adapter.py::PackedMTRActors,`
+  `pack_mtr_actor_polylines`；
+- CoLIF `opencood/models/colif/mtr_vendor.py`；
+- CoLIF `opencood/models/colif/intention_query_forecast.py::`
+  `IntentionQueryForecastHead`；
+- Reference CMP commit `de0f839` 下的 `MTR/` 官方文件保持逐字不变；
+- DualCMP 自有 `mtr_vendor.py::MTRDecoder` 只复制官方
+  `apply_transformer_decoder` 并增加 source-evidence hook；
+- 底层 decoder/loss/NMS 仍为仓库内 CMP/MTR 实现：
+  `MTREncoder`、`MTRDecoder`、`MTRDecoder.apply_cross_attention`、
+  `batch_nms`。
+
+适配：
+
+- 用 `pack_mtr_actor_polylines` 把 11 帧 actor box/mask 变成 CMP 的 22-D
+  actor polyline；tracking 保持 radians，MTR 边界严格复现官方
+  V2V4Real degree-numeric 三角函数契约；
+- 仅在 MTR 每层 intention/object-query update 之后调用已有
+  `query_feature_hook` 读 source tokens；
+- 无 source evidence 时必须精确回到 released MTR path，用于 fused/no-source
+  对照；
+- 不复制 CoLIF 的 future feedback/adapter/source-memory 分支。
+
+#### B3：Forecast target、loss、trainer 和 evaluator
+
+直接复制：
+
+- CoLIF `colif_sequence_dataset.py::_receiver_forecast_target` 的 moving-receiver
+  50-frame target 坐标契约，适配到当前 evaluator-native label source；
+- CoLIF `opencood/loss/colif_gmm_loss.py::nearest_mode_gmm_loss`；
+- CoLIF `opencood/loss/colif_loss.py::_receiver_displacement_to_actor,`
+  `_future_relative_to_track, _forecast_loss,
+  _dense_context_future_loss`，使用当前 loss-local identity pairs；
+- CoLIF `opencood/tools/colif/eval_utils.py::_absolute_forecast_error` 与 CMP
+  `generate_prediction_dicts`：把 track-relative prediction 和
+  GT-current-relative target 还原到共同绝对坐标后再计算 metric；
+- CMP `MTR/tools/eval_utils/eval_utils.py::eval_one_epoch_custom` 的 1/3/5 s
+  minADE/minFDE/MR 定义；
+- 当前 `train_tracking_ddp.py` 的两进程 DDP、artifact provenance 和 strict
+  checkpoint 路径，适配为 forecast/joint trainer。
+
+不得新建 trajectory loss、metric、mode matching、trajectory NMS 或自定义
+source gate。
+
+#### B4：模型级验收（整个 Phase B 未通过前均为 incomplete）
+
+短验收：
+
+- 真实 forecast item 有 11 帧 causal runtime history 和 50 帧 target-only future；
+- online forward 不得出现 GT ID/future，prediction 不反写 tracker；
+- source 0/1 内容变化必须只通过 source-token/intention attention 改变轨迹；
+- `L_pred` 梯度经 tokenizer 到达 per-CAV `source_bev`；Phase B 按 CoLIF
+  `configure_trainable_phase(phase=2)` 冻结 detector/tracker，shared encoder 参数更新
+  留到 Phase C joint fine-tuning；
+- checkpoint 必须 strict-load 到新进程并完成真实 online inference。
+
+最终验收：
+
+- 冻结子集为 `testoutput_CAV_data_2022-03-17-11-02-23_2`、receiver
+  0/1、预测时刻 237--244：共 16 个 11-history/50-future 样本，94 个
+  complete-50-frame actor targets；
+- 训练前在同子集记录 stationary/CV 基线和 CMP metric；固定 seed
+  20260901 和最多 800 optimizer steps；
+- 双 GPU DDP 从新 checkpoint 完成过拟合，实测后再提高 per-GPU
+  batch/workers 直到合理使用显存/CPU；
+- 新进程使用 CMP 1/3/5 s minADE/minFDE/MR 评估；指标必须明显优于
+  同子集 stationary/CV 基线，ADE/FDE 应与本地 CMP/MTR 量级一致，
+  不接受十几米这类明显失效结果；
+- 必须同时重跑 tracking evaluator，确认接入 forecast 后 actor/ID/history 未
+  发生实质回归；
+- 只有训练、checkpoint、online forecast 和 metric 全部成立，Phase B 才完成。
+
+### Phase C：联合微调（下一主线）
 
 按 UniAD/UniV2X/V2XPnP 的 staged initialization 思路，不重造 loss：
 

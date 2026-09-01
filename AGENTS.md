@@ -1,72 +1,114 @@
 # Repository Rules
 
-默认用中文，先给结论；只报告实际观察、验证、风险和未完成项。
+Respond in Chinese by default. Lead with the result and report only observed
+evidence, validation, risks, and unfinished work.
 
 ## Route
 
-- 实质代码、ML、数据、性能、训练或评估工作先读 `code-implementation`。
-- 涉及既有设计、checkpoint、实验、恢复或 Serena 时先读
-  `memory-maintenance`，再核对当前代码与 Git 状态。
-- 本地论文与关联代码优先 PaperMeld/PaperMason；仓库语义优先 Serena，
-  字面搜索用 `rg`，当前 API/上游行为查官方来源。
-- 阶段切换或上下文压缩后重新检查本文件和适用 Skill。
+- Read `code-implementation` before substantive code, ML, data, performance,
+  training, or evaluation work.
+- Read `memory-maintenance` before work involving existing design, checkpoints,
+  experiments, recovery, or Serena; then verify the current code and Git state.
+- Use PaperMeld/PaperMason first for local papers and linked code. Use Serena
+  for repository semantics, `rg` for literal search, and official sources for
+  current APIs or upstream behavior.
+- Recheck this file and applicable Skills after compaction or a phase change.
 
 ## Work
 
-- 开始前明确最终用户功能、真实入口、数据、输出、失败行为和验收标准。
-- 优先复用已验证实现；版本、接口、假设和许可证必须匹配。metric、loss、
-  matching cost 不得自行发明或静默改变语义。
-- 派发实现必须写明复用的仓库、文件和符号；未证明现有实现不适配并获 Lead
-  批准前，不得自造算法、协议、数据语义或生命周期。
-- 代码、配置、命令和文档优先项目相对路径；外部数据/工具通过配置或环境提供。
-- 保护无关用户改动；不做破坏性 Git、外部写入或宽泛清理。
+- Define the final user-visible function, real entry point, data, outputs,
+  failure behavior, and acceptance evidence before implementation.
+- Reuse validated implementations whenever version, interface, assumptions,
+  and license fit. Never invent or silently change metrics, losses, matching
+  costs, data semantics, protocols, or lifecycle behavior.
+- Do not create a new algorithm or substitute design until the existing
+  reference is proven incompatible and the Lead approves the change.
+- Prefer project-relative paths in code, configuration, commands, and docs;
+  provide external data and tools through configuration or environment.
+- Preserve unrelated user work. Do not perform destructive Git operations,
+  external writes, or broad cleanup.
 
 ## Agents
 
-- Lead 负责目标、架构、分解、集成、最终验收、Git、memory 和结论。
-- 角色：`scout`=Luna/medium，`runner`=Luna/low，
-  `worker`=Terra/medium，`reviewer`=Terra/high，`researcher`=Terra/medium。
-- 常规派发使用 `fork_turns: "none"`；禁止 `fork_turns: "all"`，避免继承
-  lead 模型而破坏角色路由。
-- 任务必须有明确输入、边界、验收、停止条件，并带来实际并行、隔离、专业性或
-  独立判断收益；不要为了占满槽位派发。
-- 相同角色和相近上下文优先 `followup_task` 复用原 agent。agent 中断时先用原
-  canonical task 名继续，并检查共享工作树是否已有部分修改；只有工具明确判定原
-  agent 不可恢复且当前没有合适角色时才新建。
-- 一个紧密代码路径只允许一个 writer；不要重叠写入。
+- The Lead owns the target, architecture, decomposition, integration, final
+  acceptance, Git, memory, and conclusion. Before every implementation task,
+  the Lead must fix the exact repository/file/symbol to copy, required interface
+  adaptations, full-model integration path, and real functional acceptance.
+  Architecture and algorithm selection must not be delegated to a worker.
+- The Lead is accountable for quality, progress, wall-clock time, and agent
+  coordination cost. Subagent output is candidate evidence only; the Lead must
+  inspect decisive source, diffs, artifacts, and real validation before
+  accepting, partially accepting, or rejecting it.
+- Roles: `scout`=Luna/medium, `runner`=Luna/low,
+  `worker`=Terra/medium, `reviewer`=Terra/high,
+  `researcher`=Terra/medium.
+- Routine dispatch uses `fork_turns: "none"`; never use `fork_turns: "all"`,
+  which can inherit the Lead model and break role routing.
+- Every task needs exact inputs, boundaries, acceptance, and stop conditions.
+  Dispatch only when parallelism, context isolation, specialization, or
+  independent judgment saves more wall-clock time than coordination costs.
+  Never dispatch merely to occupy a slot.
+- A worker only copies, adapts, and integrates the references selected by the
+  Lead. If the reference version, interface, assumptions, or license do not
+  fit, stop and return evidence; do not choose a replacement design.
+- Reuse the same agent with `followup_task` for related work. After interruption,
+  resume the original canonical task and inspect partial shared-tree changes.
+  Create a new agent only when the original cannot be recovered and no suitable
+  existing role is available.
+- Allow only one writer on a tightly coupled code path; never overlap writes.
 
 ## Acceptance
 
-- 派发实现任务前先固定最终功能验收：真实入口、本地数据、资源配置、权威
-  evaluator/protocol、样本数、预算和数值阈值；不得看结果后改门槛。
-- Worker 必须自行完成最接近最终功能的短验收。语法、import、shape、mock、单元测试
-  或孤立模块正确，只是中间证据，不代表功能完成。
-- 数据/I/O 必须由真实下游入口消费；学习组件必须走通真实
-  `forward -> loss -> backward -> optimizer -> checkpoint -> inference -> metric`。
-  需要学习能力时，以预先声明的小子集过拟合或短训练 metric 达标为准；loss 下降
-  本身不算通过。
-- 未接入最终路径的模块必须标记为 incomplete。中间 Git checkpoint 只是恢复点，
-  不得表述为功能验收完成。
-- `runner` 只用于长时、资源密集或高噪声任务，如双 GPU 训练、过拟合、完整评估、
-  benchmark 和长日志；不要派 runner 重跑 worker 的基本测试。
-- 仅在最终端到端验收通过后创建 fresh `reviewer`；中间模块不创建 reviewer，除非
-  用户明确要求提前审查。
+- Before dispatching implementation, freeze the real entry point, local data,
+  hardware, authoritative evaluator/protocol, sample set, run budget, and
+  acceptance criteria. Do not change criteria after observing results.
+- A worker must run the closest practical short functional check. Syntax,
+  imports, shapes, mocks, unit tests, or isolated-module correctness are only
+  preflight evidence and never prove feature completion.
+- Data and I/O must be consumed by the real downstream path. Every learned
+  component must complete `forward -> loss -> backward -> optimizer ->
+  checkpoint -> inference -> metric`. When learning ability is required, use a
+  predeclared small-subset overfit or short training run with reasonable task
+  metrics; decreasing loss alone is insufficient.
+- CPU static/unit tests may only remove a specific uncertainty. Do not rerun
+  large collections of similar CPU tests as completion evidence. The primary
+  phase gate must test the project outcome through real training, a fresh
+  checkpoint, inference, and authoritative, reasonable metrics. A stage remains
+  incomplete when its outcome metric is invalid, regardless of test count.
+- Mark modules not connected to the final path as incomplete. A Git checkpoint
+  is a recovery point, not functional acceptance.
+- Use `runner` only for long, resource-heavy, or noisy jobs such as two-GPU
+  training, overfit runs, full evaluation, benchmarks, and long logs. Do not
+  dispatch a runner to repeat a worker's basic checks.
+- Give runners the smallest representative sample that can decide the current
+  hypothesis; never run the full dataset for debugging or architecture design.
+- Create a fresh `reviewer` only after final end-to-end acceptance passes,
+  unless the user explicitly requests an earlier review.
 
 ## Environment
 
-- 当前验证环境：`/home/qkb/miniconda3/envs/coop/bin/python`
-  （Python 3.10.20）。CPU 检查设置 `CUDA_VISIBLE_DEVICES=''`。
-- 仓库 `environment.yml` 声明 Python 3.7.11；迁移前新代码保持 Python 3.7 语法，
-  并明确 grammar 检查不等于 3.7 ABI/runtime 验证。
-- 所有 CUDA 测试、训练和评估必须使用本地两张 GPU 的两进程分布式路径，不接受
-  单 GPU 结果。运行前检查 CPU、RAM、磁盘和双 GPU。
-- `batch_size` 默认表示每 GPU 样本数。先保证正确，再基于实测提高 batch、workers、
-  pin/persistent workers 和 prefetch，记录 global batch、峰值显存与吞吐。
+- Validation environment: `/home/qkb/miniconda3/envs/coop/bin/python`
+  (Python 3.10.20). Set `CUDA_VISIBLE_DEVICES=''` for CPU-only checks.
+- `environment.yml` declares Python 3.7.11. Until migration, keep new code
+  compatible with Python 3.7 syntax; a grammar check is not a 3.7 ABI/runtime
+  validation.
+- Every CUDA test, training run, and evaluation must use both local GPUs through
+  a two-process distributed path; single-GPU results are not accepted. Inspect
+  CPU, RAM, disk, and both GPUs before launch.
+- Compute is not a cost constraint: use available GPU and CPU capacity to reduce
+  wall-clock time on the correct path. `batch_size` means samples per GPU. After
+  correctness preflight, increase batch size, workers, pinned/persistent
+  workers, and prefetch from measured headroom; record global batch, peak GPU
+  memory, and throughput.
 
 ## Finish
 
-- 按“静态 -> 单元 -> 真实样本 -> 集成 -> 训练/评估”逐级验证，只报告实际运行项。
-- 删除本任务确认无用的 scratch、缓存和中间产物；保留交付物、证据、用户文件和
-  不确定文件。
-- 功能达到验收后才做隔离本地 Git checkpoint；只暂存任务文件，不 push。
-- 仅持久化已验证、非显然、未来有影响且重查代价高的 memory；保持简洁。
+- Validate in the order `static -> focused -> real sample -> integration ->
+  training/evaluation`, but stop repeating checks once their uncertainty is
+  resolved. Report only checks actually run.
+- Remove confirmed task scratch, caches, and obsolete intermediate artifacts;
+  retain deliverables, evidence, user files, and uncertain files.
+- Create an isolated local Git checkpoint only after the functional gate passes;
+  stage task-owned files only and never push without authorization.
+- Persist only verified, non-obvious, future-relevant knowledge that is costly
+  to rediscover. Keep `HANDOFF.md`, `MEMORY.md`, and `LOG.md` concise and current.
