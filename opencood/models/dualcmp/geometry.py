@@ -67,6 +67,20 @@ def transform_boxes(boxes, transform):
     return result
 
 
+def transform_filter(mean, covariance, transform):
+    """Receiver-coordinate adapter for DMSTrack's lidar-order DKF state."""
+    rotation, translation = transform[:, :3, :3], transform[:, :3, 3]
+    result = mean.clone()
+    result[..., :3] = torch.einsum("bij,baj->bai", rotation, mean[..., :3]) + translation[:, None, :]
+    result[..., 7:10] = torch.einsum("bij,baj->bai", rotation, mean[..., 7:10])
+    yaw_delta = torch.atan2(rotation[:, 1, 0], rotation[:, 0, 0])
+    result[..., 3] = wrap_angle(mean[..., 3] + yaw_delta[:, None])
+    jacobian = torch.eye(10, dtype=mean.dtype, device=mean.device).unsqueeze(0).repeat(mean.shape[0], 1, 1)
+    jacobian[:, :3, :3], jacobian[:, 7:10, 7:10] = rotation, rotation
+    covariance = torch.matmul(torch.matmul(jacobian[:, None], covariance), jacobian[:, None].transpose(-1, -2))
+    return result, covariance
+
+
 def propagate_state(state, current_pose, current_time_s, max_dt_s, scene_reset_mask=None):
     """Re-express a state in the current receiver frame and apply CV motion."""
     state.validate()
@@ -100,15 +114,17 @@ def propagate_state(state, current_pose, current_time_s, max_dt_s, scene_reset_m
     transformed_history = transform_boxes(state.history_box, transform)
     rotation_xy = transform[:, :2, :2]
     velocity = torch.einsum("bij,baj->bai", rotation_xy, state.velocity)
-    propagated_box = transformed_box.clone()
-    propagated_box[..., :2] = propagated_box[..., :2] + velocity * dt[:, None, None]
+    filter_mean, filter_cov = transform_filter(state.filter_mean, state.filter_cov, transform)
     slot_mask = state.valid_mask & valid_rows[:, None]
     history_mask = state.history_mask & valid_rows[:, None, None]
-    box = torch.where(slot_mask[:, :, None], propagated_box, result.box)
+    box = torch.where(slot_mask[:, :, None], transformed_box, result.box)
     velocity = torch.where(slot_mask[:, :, None], velocity, result.velocity)
     history_box = torch.where(history_mask[:, :, :, None], transformed_history, result.history_box)
+    filter_mean = torch.where(slot_mask[:, :, None], filter_mean, result.filter_mean)
+    filter_cov = torch.where(slot_mask[:, :, None, None], filter_cov, result.filter_cov)
     values = {item.name: getattr(result, item.name) for item in fields(ActorState)}
     values.update({"box": box, "velocity": velocity, "history_box": history_box,
+                   "filter_mean": filter_mean, "filter_cov": filter_cov,
                    "receiver_pose": current_pose, "receiver_time_s": current_time_s})
     next_state = ActorState(**values)
     next_state.validate()

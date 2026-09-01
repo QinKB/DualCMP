@@ -6,9 +6,12 @@ GPU; the frozen window below has 44 receiver-centric clips (22 per receiver).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import sys
 import time
 
 import torch
@@ -24,6 +27,37 @@ from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRESSION, TOTAL_CLIPS, WINDOW, WINDOW_FRAMES
 
 LOSS_KEYS = ("L_det", "L_exist", "L_box", "L_velocity")
+_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _protocol_sha256():
+    return _sha256_file(Path(__file__).resolve().with_name("protocol.py"))
+
+
+def _required_code_sha(value=None):
+    source_sha = os.environ.get("DUALCMP_CODE_SHA") if value is None else value
+    if not source_sha or not _SHA1_RE.match(source_sha):
+        raise EnvironmentError("DUALCMP_CODE_SHA must be a 40-character hexadecimal checkpoint commit SHA")
+    return source_sha.lower()
+
+
+def _run_provenance(args, world_size, gpu_names):
+    """Record the explicit checkpoint source, never a dirty working-tree HEAD."""
+    return {"source_sha": _required_code_sha(), "protocol_sha256": _protocol_sha256(),
+            "argv": list(sys.argv), "world_size": int(world_size),
+            "gpu_names": list(gpu_names), "seed": int(args.seed),
+            "epochs": int(args.epochs), "lr": float(args.lr), "amp": bool(args.amp),
+            "per_rank_batch": 1, "global_batch": int(world_size), "workers": 0,
+            "window_frames": WINDOW_FRAMES, "clips_per_receiver": CLIPS_PER_RECEIVER,
+            "total_clips": TOTAL_CLIPS, "window": list(WINDOW)}
 
 
 def _init_distributed():
@@ -69,8 +103,12 @@ def _assert_sync(model):
 
 
 def train(args):
+    _required_code_sha()
     rank, local_rank, world_size = _init_distributed()
     device = torch.device("cuda", local_rank)
+    gpu_names = [None for _ in range(world_size)]
+    dist.all_gather_object(gpu_names, torch.cuda.get_device_name(local_rank))
+    provenance = _run_provenance(args, world_size, gpu_names)
     hypes, detector_weights = _hypes(args.hypes)
     dataset = DualCMPSequenceDataset(hypes, train=True)
     per_receiver = {entry["receiver_id"]: 0 for entry in WINDOW}
@@ -99,10 +137,7 @@ def train(args):
     output = Path(args.output_dir)
     if rank == 0:
         output.mkdir(parents=True, exist_ok=False)
-        (output / "config.json").write_text(json.dumps({"seed": args.seed, "epochs": args.epochs,
-            "per_rank_batch": 1, "global_batch": world_size, "workers": 0,
-            "window_frames": WINDOW_FRAMES, "clips_per_receiver": CLIPS_PER_RECEIVER,
-            "total_clips": TOTAL_CLIPS, "window": WINDOW}, indent=2), encoding="utf-8")
+        (output / "config.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     dist.barrier()
     step, started, last = 0, time.monotonic(), None
     for epoch in range(args.epochs):
@@ -129,11 +164,15 @@ def train(args):
     _assert_sync(model.module)
     peak_memory = torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
     elapsed = time.monotonic() - started
-    report = {"steps": step, "loss": dict(zip(LOSS_KEYS, last or [])), "per_rank_batch": 1,
-              "global_batch": world_size, "workers": 0, "peak_memory_mib": peak_memory,
+    report = {"steps": step, "loss": dict(zip(LOSS_KEYS, last or [])),
+              "provenance": provenance, "peak_memory_mib": peak_memory,
               "clips_per_second_per_rank": step / max(elapsed, 1e-9)}
     if rank == 0:
-        torch.save({"model": model.module.state_dict(), "epoch": epoch, "step": step}, output / "checkpoint.pt")
+        checkpoint = output / "checkpoint.pt"
+        torch.save({"model": model.module.state_dict(), "epoch": epoch, "step": step,
+                    "provenance": {"source_sha": provenance["source_sha"],
+                                   "protocol_sha256": provenance["protocol_sha256"]}}, checkpoint)
+        report["checkpoint_sha256"] = _sha256_file(checkpoint)
         (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
     dist.barrier()

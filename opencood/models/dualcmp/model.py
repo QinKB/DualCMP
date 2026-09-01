@@ -12,6 +12,7 @@ from .proposal import decode_proposals
 from .roi_sampler import ActorRoiSampler
 from .state import ActorState
 from .tracker import ActorTracker
+from .kalman import box_to_measurement, update as kalman_update
 
 
 class DualCmpClipModel(nn.Module):
@@ -29,6 +30,8 @@ class DualCmpClipModel(nn.Module):
         self.roi = ActorRoiSampler(lidar_range)
         self.tracker = ActorTracker(max_miss=max_miss)
         feature_dim = int(detector_args["fax_fusion"]["input_dim"])
+        self.temporal_attention = nn.MultiheadAttention(
+            embed_dim=feature_dim, num_heads=8, dropout=0.1, batch_first=True)
         self.track_update = nn.Sequential(nn.Linear(feature_dim, feature_dim), nn.ReLU())
         self.track_exist = nn.Linear(feature_dim, 1)
         self.track_box = nn.Linear(feature_dim, 7)
@@ -38,6 +41,41 @@ class DualCmpClipModel(nn.Module):
     def emission_mask(valid_mask, quality, threshold):
         """AB3DMOT-style max-age validity plus learned quality threshold."""
         return valid_mask & (quality >= float(threshold))
+
+    @staticmethod
+    def temporal_fuse(attention, current_feature, previous_feature, valid_mask):
+        """Sparse4D temp_gnn adapted to one query/key/value per runtime slot."""
+        batch_size, actor_count, feature_dim = current_feature.shape
+        attended, _ = attention(
+            current_feature.reshape(batch_size * actor_count, 1, feature_dim),
+            previous_feature.reshape(batch_size * actor_count, 1, feature_dim),
+            previous_feature.reshape(batch_size * actor_count, 1, feature_dim),
+            need_weights=False)
+        fused = current_feature + attended.reshape(batch_size, actor_count, feature_dim)
+        return torch.where(valid_mask[..., None], fused, current_feature)
+
+    @classmethod
+    def apply_learned_update(cls, state, update, boxes, velocities, quality, threshold):
+        """Update learned state without replacing the tracker measurement score."""
+        valid = state.valid_mask
+        candidate_mean, candidate_cov = kalman_update(
+            state.filter_mean, state.filter_cov, box_to_measurement(boxes))
+        return replace(
+            state,
+            feature=torch.where(valid[..., None], update, state.feature),
+            box=torch.where(valid[..., None], boxes, state.box),
+            velocity=torch.where(valid[..., None], velocities, state.velocity),
+            quality=torch.where(valid, quality, state.quality),
+            score=state.score,
+            filter_mean=torch.where(valid[..., None], candidate_mean, state.filter_mean),
+            filter_cov=torch.where(valid[..., None, None], candidate_cov, state.filter_cov),
+            active_mask=cls.emission_mask(valid, quality, threshold),
+            history_box=torch.where(
+                valid[..., None, None],
+                torch.cat((boxes.unsqueeze(2), state.history_box[:, :, :-1]), dim=2),
+                state.history_box),
+            history_mask=torch.where(valid[..., None], torch.ones_like(state.history_mask), state.history_mask),
+        )
 
     def forward(self, runtime_frames, state=None, max_dt_s=0.2,
                 detector_autocast=False):
@@ -74,28 +112,17 @@ class DualCmpClipModel(nn.Module):
             detector["proposals"] = proposals
             detector["state"] = state
             detector["roi_feature"] = self.roi(detector["fused_bev"], state.box)
-            update = self.track_update(detector["roi_feature"])
+            detector["temporal_feature"] = self.temporal_fuse(
+                self.temporal_attention, detector["roi_feature"], state.feature,
+                state.valid_mask)
+            update = self.track_update(detector["temporal_feature"])
             detector["track_exist_logits"] = self.track_exist(update).squeeze(-1)
             detector["track_box"] = state.box + self.track_box(update)
             detector["track_velocity"] = state.velocity + self.track_velocity(update)
             quality = detector["track_exist_logits"].sigmoid()
-            valid = state.valid_mask
-            state = replace(
-                state,
-                feature=torch.where(valid[..., None], update, state.feature),
-                box=torch.where(valid[..., None], detector["track_box"], state.box),
-                velocity=torch.where(valid[..., None], detector["track_velocity"], state.velocity),
-                quality=torch.where(valid, quality, state.quality),
-                score=torch.where(valid, quality, state.score),
-                # AB3DMOT output keeps valid tracks through max_age; an
-                # unmatched frame must not suppress a quality-qualified actor.
-                active_mask=self.emission_mask(valid, quality, self.emission_threshold),
-                history_box=torch.where(
-                    valid[..., None, None],
-                    torch.cat((detector["track_box"].unsqueeze(2), state.history_box[:, :, :-1]), dim=2),
-                    state.history_box),
-                history_mask=torch.where(valid[..., None], torch.ones_like(state.history_mask), state.history_mask),
-            )
+            state = self.apply_learned_update(
+                state, update, detector["track_box"], detector["track_velocity"],
+                quality, self.emission_threshold)
             state.validate()
             detector["state"] = state
             outputs.append(detector)

@@ -35,6 +35,8 @@ class ActorState:
     last_update_time_s: torch.Tensor
     history_box: torch.Tensor
     history_mask: torch.Tensor
+    filter_mean: torch.Tensor
+    filter_cov: torch.Tensor
     receiver_pose: torch.Tensor
     receiver_time_s: torch.Tensor
 
@@ -76,6 +78,8 @@ class ActorState:
             last_update_time_s=torch.full((batch_size, max_actors), float("nan"), device=device, dtype=dtype),
             history_box=torch.zeros(batch_size, max_actors, history_len, 7, device=device, dtype=dtype),
             history_mask=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=torch.bool),
+            filter_mean=torch.zeros(batch_size, max_actors, 10, device=device, dtype=dtype),
+            filter_cov=torch.zeros(batch_size, max_actors, 10, 10, device=device, dtype=dtype),
             receiver_pose=receiver_pose,
             receiver_time_s=receiver_time_s,
         )
@@ -95,7 +99,8 @@ class ActorState:
         float_fields = {
             "feature": self.feature, "box": self.box, "velocity": self.velocity,
             "score": self.score, "quality": self.quality,
-            "history_box": self.history_box, "receiver_pose": self.receiver_pose,
+            "history_box": self.history_box, "filter_mean": self.filter_mean,
+            "filter_cov": self.filter_cov, "receiver_pose": self.receiver_pose,
             "receiver_time_s": self.receiver_time_s,
         }
         reference = self.feature
@@ -122,6 +127,13 @@ class ActorState:
             raise ValueError("history_mask must match history_box [B,A,H]")
         if torch.any(self.history_mask & ~self.valid_mask[:, :, None]):
             raise ValueError("history_mask can only be set for valid actors")
+        if self.filter_mean.shape != (batch_size, max_actors, 10):
+            raise ValueError("filter_mean must have shape [B,A,10]")
+        if self.filter_cov.shape != (batch_size, max_actors, 10, 10):
+            raise ValueError("filter_cov must have shape [B,A,10,10]")
+        invalid = ~self.valid_mask
+        if torch.any(self.filter_mean[invalid] != 0) or torch.any(self.filter_cov[invalid] != 0):
+            raise ValueError("invalid actors must have zero filter_mean/filter_cov")
         if self.receiver_pose.shape != (batch_size, 4, 4):
             raise ValueError("receiver_pose must have shape [B,4,4]")
         if self.receiver_time_s.shape != (batch_size,):

@@ -9,7 +9,7 @@ from opencood.utils import box_utils_v2v4real
 
 def decode_proposals(psm, rm, anchors, top_k, *, training,
                      score_threshold, nms_thresh):
-    """Decode detector proposals with train/eval-specific candidate policy."""
+    """Decode one shared score-thresholded and NMS-filtered candidate contract."""
     if psm.ndim != 4 or rm.ndim != 4 or psm.shape[0] != rm.shape[0]:
         raise ValueError("psm/rm must be matching [B,C,H,W] tensors")
     if top_k < 1:

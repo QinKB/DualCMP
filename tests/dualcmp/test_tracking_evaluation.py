@@ -1,6 +1,7 @@
 """Environment-gated lifecycle-oracle regression for frozen DualCMP windows."""
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import numpy as np
@@ -9,8 +10,11 @@ from opencood.data_utils.v2v4real.datasets.dualcmp_sequence_dataset import DualC
 from opencood.data_utils.v2v4real.datasets.dualcmp_target_builder import load_tracking_label_file, transform_tracking_boxes
 from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.tools.dualcmp.ab3dmot_metrics import compute_ab3dmot_metrics
-from opencood.tools.dualcmp.online import _gt_conditioned_audit, _target_lifecycle_audit
+from opencood.tools.dualcmp.online import (_checkpoint_provenance, _gt_conditioned_audit,
+                                           _protocol_sha256, _sha256_file,
+                                           _target_lifecycle_audit, run_fixed_evaluation)
 from opencood.tools.dualcmp.protocol import AUDIT_DENOMINATORS, AUDIT_THRESHOLDS, METRIC_THRESHOLDS, WINDOW
+from opencood.tools.dualcmp.train_tracking_ddp import _required_code_sha, _run_provenance
 
 
 def _hypes():
@@ -46,6 +50,8 @@ def test_frozen_lifecycle_oracle_and_empty():
     assert values["keep_tp"] >= AUDIT_THRESHOLDS["keep_same_runtime"]
     assert values["delete_tp"] >= AUDIT_THRESHOLDS["delete_tp"]
     assert METRIC_THRESHOLDS["identity_switches_max"] == 8
+    assert METRIC_THRESHOLDS["AMOTA"] == pytest.approx(0.70)
+    assert AUDIT_THRESHOLDS["delete_tp"] == 21
     metrics = compute_ab3dmot_metrics(oracle, repository_root=".", ground_truth_root=os.environ["DUALCMP_TRACKING_LABEL_ROOT"])
     assert all(metrics[key] == 1.0 for key in ("sAMOTA", "AMOTA", "MOTA", "tracking_recall", "tracking_precision"))
     assert metrics["identity_switches"] == 0
@@ -84,3 +90,41 @@ def test_label_targets_cover_frozen_windows_and_receiver_one_roundtrip():
     sample = dataset[0]
     from opencood.data_utils.v2v4real.datasets.dualcmp_schema import assert_runtime_is_supervision_free
     assert_runtime_is_supervision_free(sample["runtime_frames"])
+
+
+def test_checkpoint_provenance_is_hashed_and_fails_closed(tmp_path, monkeypatch):
+    source_sha = "a" * 40
+    monkeypatch.setenv("DUALCMP_CODE_SHA", source_sha)
+    args = SimpleNamespace(seed=7, epochs=2, lr=0.001, amp=False)
+    recorded = _run_provenance(args, 2, ["GPU zero", "GPU one"])
+    assert recorded["source_sha"] == source_sha
+    assert recorded["world_size"] == 2 and recorded["gpu_names"] == ["GPU zero", "GPU one"]
+    assert recorded["argv"] and recorded["seed"] == 7 and recorded["epochs"] == 2
+    assert recorded["lr"] == pytest.approx(0.001) and not recorded["amp"]
+    assert (recorded["per_rank_batch"], recorded["global_batch"], recorded["workers"]) == (1, 2, 0)
+    assert recorded["window"] == list(WINDOW)
+    checkpoint = tmp_path / "checkpoint.pt"
+    import torch
+    torch.save({"model": {}, "provenance": {"source_sha": source_sha,
+                                                "protocol_sha256": _protocol_sha256()}}, checkpoint)
+    provenance = _checkpoint_provenance(checkpoint)
+    report = {"provenance": recorded, "checkpoint_sha256": provenance["checkpoint_sha256"]}
+    assert report["checkpoint_sha256"] == _sha256_file(checkpoint)
+    assert provenance["source_sha"] == source_sha
+    assert provenance["checkpoint_protocol_sha256"] == provenance["current_protocol_sha256"]
+
+    torch.save({"model": {}}, checkpoint)
+    with pytest.raises(RuntimeError, match="metadata"):
+        _checkpoint_provenance(checkpoint)
+    torch.save({"model": {}, "provenance": {"source_sha": "not-a-sha",
+                                                "protocol_sha256": _protocol_sha256()}}, checkpoint)
+    with pytest.raises(RuntimeError, match="source_sha"):
+        _checkpoint_provenance(checkpoint)
+    torch.save({"model": {}, "provenance": {"source_sha": source_sha,
+                                                "protocol_sha256": "0" * 64}}, checkpoint)
+    with pytest.raises(RuntimeError, match="protocol SHA256"):
+        _checkpoint_provenance(checkpoint)
+    with pytest.raises(RuntimeError, match="protocol SHA256"):
+        run_fixed_evaluation({}, checkpoint, "cpu")
+    with pytest.raises(EnvironmentError, match="DUALCMP_CODE_SHA"):
+        _required_code_sha("not-a-sha")

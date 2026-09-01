@@ -6,8 +6,10 @@ Targets are neither constructed nor passed to the model.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
+import re
 import sys
 
 import torch
@@ -23,6 +25,41 @@ from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.ab3dmot_metrics import tracking_frame_prediction
 from opencood.tools.dualcmp.protocol import AUDIT_DENOMINATORS, AUDIT_THRESHOLDS, DETECTOR_COMPRESSION, METRIC_THRESHOLDS, WINDOW, WINDOW_FRAMES
 
+_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _protocol_sha256():
+    return _sha256_file(Path(__file__).resolve().with_name("protocol.py"))
+
+
+def _checkpoint_provenance(checkpoint, payload=None):
+    """Reject checkpoints that cannot prove their code and protocol origin."""
+    checkpoint = Path(checkpoint)
+    payload = torch.load(checkpoint, map_location="cpu") if payload is None else payload
+    if not isinstance(payload, dict) or not isinstance(payload.get("provenance"), dict):
+        raise RuntimeError("checkpoint provenance metadata is required for DualCMP evaluation")
+    provenance = payload["provenance"]
+    source_sha = provenance.get("source_sha")
+    protocol_sha = provenance.get("protocol_sha256")
+    if not isinstance(source_sha, str) or not _SHA1_RE.match(source_sha):
+        raise RuntimeError("checkpoint provenance source_sha must be a 40-character hexadecimal SHA")
+    if not isinstance(protocol_sha, str) or not re.match(r"^[0-9a-fA-F]{64}$", protocol_sha):
+        raise RuntimeError("checkpoint provenance protocol_sha256 must be a SHA256 digest")
+    current_protocol_sha = _protocol_sha256()
+    if protocol_sha.lower() != current_protocol_sha:
+        raise RuntimeError("checkpoint protocol SHA256 does not match the current frozen protocol")
+    return {"checkpoint_sha256": _sha256_file(checkpoint),
+            "source_sha": source_sha.lower(), "checkpoint_protocol_sha256": protocol_sha.lower(),
+            "current_protocol_sha256": current_protocol_sha}
+
 
 def _model_from_checkpoint(hypes, checkpoint, device):
     postprocessor = build_postprocessor(hypes["postprocess"], train=False)
@@ -33,6 +70,7 @@ def _model_from_checkpoint(hypes, checkpoint, device):
                              proposal_nms_thresh=hypes["postprocess"]["nms_thresh"],
                              emission_threshold=target_args["score_threshold"])
     payload = torch.load(checkpoint, map_location="cpu")
+    _checkpoint_provenance(checkpoint, payload)
     state_dict = payload.get("model", payload.get("model_state_dict", payload))
     if any(key.startswith("module.") for key in state_dict):
         state_dict = {key[7:] if key.startswith("module.") else key: value
@@ -223,6 +261,7 @@ def _target_lifecycle_audit(hypes, predictions, repository_root):
 
 def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
     """Fresh strict-online 2x24-frame evaluation and GT-conditioned audit."""
+    provenance = _checkpoint_provenance(checkpoint)
     label_root = hypes.get("fusion", {}).get("args", {}).get("tracking_label_root")
     if not label_root:
         raise EnvironmentError("fixed DualCMP evaluation requires tracking_label_root")
@@ -266,7 +305,7 @@ def run_fixed_evaluation(hypes, checkpoint, device, repository_root="."):
                    if key != "identity_switches_max"}
     metric_pass["identity_switches"] = metrics["identity_switches"] <= METRIC_THRESHOLDS["identity_switches_max"]
     combined = dict(metric_pass); combined.update(passed)
-    return {"metrics": metrics, "audit": {"numerator": lifecycle, "rate": rates,
+    return {"provenance": provenance, "metrics": metrics, "audit": {"numerator": lifecycle, "rate": rates,
             "pass": combined, "overall_pass": all(combined.values())}}
 
 
