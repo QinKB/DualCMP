@@ -5,6 +5,7 @@ MTR/output/*
 MTR/build/*
 MTR/MotionTransformer.egg-info/*
 pretrained/*
+preprocessed_data/*
 preprocessed_data/opv2v/fused_*
 preprocessed_data/opv2v/detection*
 preprocessed_data/opv2v/new_ab3dmot*
