@@ -32,8 +32,9 @@
 
 ## Verified
 
-- Current checkpoint: `CP-20260901-04`, commit
-  `5f84817ef98ea3bd57cf96293ee99358e8e6c507`.
+- Current checkpoint: `CP-20260902-03`, commit
+  `93d851e`, binding official detector-only Phase-A initialization and
+  checkpoint-driven compression across all later stages.
 - Tracker online path provides current actors, receiver-local boxes and runtime
   IDs plus an 11-frame causal capture-native forecast history.
 - `PointPillarFax` returns `source_bev/source_mask/fused_bev`; source BEV is
@@ -108,3 +109,4 @@
 | CP-20260901-05 | `fd9189c` | restore fixed CoLIF/CMP heading boundary | two-GPU smoke + fresh CMP eval | 800-step result |
 | CP-20260901-06 | `d2ee211` | official-aligned Phase-B code | global-loss/freeze smoke + clean 800-step gate | Phase C |
 | CP-20260902-01 | `eef81d0` | full-data Phase A/B and Phase-C joint integration | two-GPU epoch-schedule preflights | Phase A logging |
+| CP-20260902-03 | `93d851e` | paper-clean detector initialization and staged compression | Phase A full-data resource gate; Phase B/C two-GPU integration | formal Phase A |
