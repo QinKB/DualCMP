@@ -30,10 +30,11 @@ AB3DMOT labels are used only at the fixed test metric boundary.
 
 ## Phase A — full tracking
 
-The accepted small-subset Phase-A checkpoint supplies the current 32×
-compressor and tracker initialization. The only local standalone CMP detector
-checkpoint is a structurally incompatible 256× model, so it is not loaded with
-`strict=False`.
+Phase A loads the official V2V4Real CMP CoBEVT detector trained on the train
+split and initializes every tracker parameter randomly. Its 256× compressor is
+kept unchanged. The checkpoint contains 16 graph/post-graph parameters that
+are disabled in the official forward; the loader requires exactly those 16
+unused keys, then strict-loads all 243 active detector keys.
 
 ```bash
 conda activate coop
@@ -41,11 +42,14 @@ conda activate coop
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
 DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test \
-DUALCMP_PHASE_A_INIT_WEIGHTS=runs/train-track-bind-s20260831/checkpoint.pt \
+DUALCMP_DETECTOR_WEIGHTS=pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth \
+DUALCMP_CODE_SHA=$(git rev-parse HEAD) \
+env -u DUALCMP_PHASE_A_INIT_WEIGHTS \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_tracking_ddp \
-  --output-dir runs/phase-a-full-s20260902 \
+  --output-dir runs/train-a-cmp256-full \
   --full-data --data-split train --epochs 20 \
+  --detector-compression 256 \
   --batch-size 4 --workers 8 \
   --lr 5e-5 --max-lr 5e-4 --weight-decay 0.01 \
   --log-every 100 --eval-every 1 --save-every 1
@@ -65,11 +69,11 @@ Start only after Phase A finishes and passes fresh evaluation.
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
 DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test \
-DUALCMP_TRACKER_WEIGHTS=runs/phase-a-full-s20260902/checkpoint.pt \
+DUALCMP_TRACKER_WEIGHTS=runs/train-a-cmp256-full/checkpoint.pt \
 DUALCMP_MTR_WEIGHTS=../data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch2_test_20260807/checkpoint_epoch_5_snapshot.pth \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_forecast_ddp \
-  --output-dir runs/phase-b-full-s20260902 \
+  --output-dir runs/train-b-full \
   --full-data --data-split train --epochs 30 \
   --batch-size 4 --workers 8 --lr 1e-4 --save-every 5
 ```
@@ -82,11 +86,11 @@ updates detection, tracking, source representation, and forecast modules.
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
-DUALCMP_INIT_WEIGHTS=runs/phase-b-full-s20260902/checkpoint.pt \
+DUALCMP_INIT_WEIGHTS=runs/train-b-full/checkpoint.pt \
 env -u DUALCMP_TRACKING_LABEL_ROOT \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_joint_ddp \
-  --output-dir runs/phase-c-full-s20260902 \
+  --output-dir runs/train-c-full \
   --full-data --data-split train --epochs 20 \
   --batch-size 6 --workers 8 \
   --base-lr 1e-5 --detector-lr-scale 0.1 \
@@ -103,13 +107,13 @@ export DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v
 
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.eval_forecast_ddp \
-  --checkpoint runs/phase-c-full-s20260902/checkpoint.pt \
-  --output runs/phase-c-full-s20260902/forecast_metrics.json
+  --checkpoint runs/train-c-full/checkpoint.pt \
+  --output runs/train-c-full/forecast_metrics.json
 
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.eval_tracking_ddp \
-  --checkpoint runs/phase-c-full-s20260902/checkpoint.pt \
-  --output runs/phase-c-full-s20260902/tracking_metrics.json
+  --checkpoint runs/train-c-full/checkpoint.pt \
+  --output runs/train-c-full/tracking_metrics.json
 ```
 
 Forecast uses the existing CMP 1/3/5-second minADE, minFDE, and MR. Tracking

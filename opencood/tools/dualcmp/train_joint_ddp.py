@@ -27,9 +27,9 @@ from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.loss.dualcmp_loss import DualCmpLoss
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.dualcmp.protocol import (
-    DETECTOR_COMPRESSION,
     FORECAST_SAMPLES,
     FORECAST_WINDOW,
+    checkpoint_detector_compression,
 )
 from opencood.tools.dualcmp.train_tracking_ddp import _assert_sync, _sha256_file
 from opencood.tools.train_utils import to_device
@@ -71,10 +71,12 @@ def _hypes(path, split, full_data):
         raise EnvironmentError("V2V4REAL_ROOT and DUALCMP_INIT_WEIGHTS are required")
     if not full_data and not labels:
         raise EnvironmentError("fixed acceptance also requires DUALCMP_TRACKING_LABEL_ROOT")
+    payload = torch.load(str(weights), map_location="cpu")
+    detector_compression = checkpoint_detector_compression(payload)
     h = load_yaml(path)
     h["root_dir"] = str(Path(root) / split)
     h["validate_dir"] = h["root_dir"]
-    h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    h["model"]["args"]["compression"] = detector_compression
     args = {
         "stage": "forecast", "tracking_frames": 3,
         "forecast_history_frames": 10, "future_frames": 50,
@@ -89,7 +91,7 @@ def _hypes(path, split, full_data):
             raise ValueError("the frozen Phase-C acceptance subset belongs to test")
         args["window"] = list(FORECAST_WINDOW)
     h["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": args}
-    return h, Path(weights)
+    return h, Path(weights), payload, detector_compression
 
 
 def _build_optimizer(model, base_lr, detector_scale, forecast_scale, weight_decay):
@@ -161,7 +163,9 @@ def main():
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
 
-    h, init_weights = _hypes(args.hypes, args.data_split, args.full_data)
+    h, init_weights, payload, detector_compression = _hypes(
+        args.hypes, args.data_split, args.full_data
+    )
     dataset = DualCMPSequenceDataset(h, train=True)
     if not args.full_data and len(dataset) != FORECAST_SAMPLES:
         raise RuntimeError("fixed Phase-C protocol requires 16 samples")
@@ -178,7 +182,6 @@ def main():
         h["model"]["args"], dataset.anchor_box,
         h["preprocess"]["cav_lidar_range"], forecast_args=forecast_args,
     ).to(device)
-    payload = torch.load(str(init_weights), map_location="cpu")
     state = payload.get("model", payload.get("model_state_dict", payload))
     state = {(key[7:] if key.startswith("module.") else key): value for key, value in state.items()}
     model.load_state_dict(state, strict=True)
@@ -278,7 +281,8 @@ def main():
     _assert_sync(model.module)
     elapsed = max(time.monotonic() - started, 1e-9)
     provenance = _provenance()
-    provenance.update({"init_checkpoint_sha256": _sha256_file(init_weights),
+    provenance.update({"detector_compression": detector_compression,
+                       "init_checkpoint_sha256": _sha256_file(init_weights),
                        "init_provenance": payload.get("provenance") if isinstance(payload, dict) else None})
     report = {
         "steps": step, "epochs_completed": epoch, "dataset_samples": len(dataset),
@@ -286,6 +290,7 @@ def main():
         "per_rank_batch": args.batch_size, "global_batch": args.batch_size * 2,
         "workers_per_rank": args.workers, "parameter_counts": parameter_counts,
         "optimizer": "AdamW", "base_lr": args.base_lr,
+        "detector_compression": detector_compression,
         "group_lrs_initial": {"detector": args.base_lr * args.detector_lr_scale,
                               "tracking": args.base_lr,
                               "forecast": args.base_lr * args.forecast_lr_scale},

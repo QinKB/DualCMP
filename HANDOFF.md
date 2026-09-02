@@ -10,6 +10,13 @@
   evaluates the fixed V2V4Real test protocol every epoch on both GPUs, and
   atomically checkpoints model/optimizer/scheduler. A fresh 20-epoch restart is
   next.
+- A second non-paper attempt was stopped after epoch 2 because it initialized
+  the full tracker from the fixed test-window overfit checkpoint. Formal Phase A
+  now loads only the official train-split CMP detector (compression 256) and
+  initializes all tracker parameters randomly.
+- Compression-256 propagation is checkpoint-driven through Phase B, Phase C,
+  tracking/forecast evaluation, and online inference. Both later stages passed
+  two-GPU one-step integration; launch `runs/train-a-cmp256-full` next.
 - Phase-C joint integration is implemented and full-data launch schedules are
   frozen from local upstream configs: Phase A 20 epochs, Phase B 30 epochs,
   Phase C 20 epochs. Formal Phase A is the next running job; Phase B starts
@@ -76,9 +83,10 @@
 
 ## Risks
 
-- The only standalone local CMP detector checkpoint is a structurally
-  incompatible 256x model. Formal Phase A therefore resumes the accepted 32x
-  Phase-A checkpoint rather than using a partial or non-strict load.
+- The official CMP detector checkpoint has 243 active keys matching
+  `PointPillarFax` and 16 graph/post-graph keys disabled by official forward.
+  Formal loading requires that exact allowlist and strict-loads all active
+  parameters; it never loads a tracker checkpoint.
 - Current one-token tracker attention is not the full Sparse4D temporal
   attention and must not be described as such.
 - Learned-box second KF update is a project adaptation, not a verbatim

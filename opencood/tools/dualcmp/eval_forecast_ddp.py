@@ -17,9 +17,9 @@ from opencood.tools.dualcmp.online import (
     _model_from_checkpoint,
 )
 from opencood.tools.dualcmp.protocol import (
-    DETECTOR_COMPRESSION,
     FORECAST_WINDOW,
     FORECAST_SAMPLES,
+    checkpoint_detector_compression,
 )
 
 
@@ -32,13 +32,16 @@ def main():
     checkpoint_provenance = _checkpoint_provenance(
         a.checkpoint, allow_dirty_smoke=True
     )
+    checkpoint_payload = torch.load(a.checkpoint, map_location="cpu")
     dist.init_process_group("nccl")
     rank, local = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local)
     h = load_yaml("opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml")
     h["root_dir"] = str(Path(os.environ["V2V4REAL_ROOT"]) / "test")
     h["validate_dir"] = h["root_dir"]
-    h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    h["model"]["args"]["compression"] = checkpoint_detector_compression(
+        checkpoint_payload
+    )
     h["fusion"] = {
         "args": {
             "stage": "forecast",

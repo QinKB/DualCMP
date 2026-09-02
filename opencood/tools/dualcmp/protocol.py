@@ -35,6 +35,28 @@ METRIC_THRESHOLDS = {"sAMOTA": 0.70, "AMOTA": 0.70, "MOTA": 0.70,
                      "identity_switches_max": 8}
 
 
+def checkpoint_detector_compression(payload):
+    """Return the detector compression frozen in a staged checkpoint."""
+    provenance = payload.get("provenance", {}) if isinstance(payload, dict) else {}
+    value = provenance.get("detector_compression")
+    if value is None:
+        state = payload.get("model", payload.get("model_state_dict", payload))
+        if not isinstance(state, dict):
+            raise RuntimeError("checkpoint has no detector state dictionary")
+        keys = (
+            "detector.naive_compressor.encoder.0.weight",
+            "module.detector.naive_compressor.encoder.0.weight",
+        )
+        tensor = next((state[key] for key in keys if key in state), None)
+        if tensor is None or tensor.ndim != 4 or tensor.shape[1] != 256:
+            raise RuntimeError("checkpoint does not declare an inferable detector compression")
+        value = 256 // int(tensor.shape[0])
+    value = int(value)
+    if value < 1 or 256 % value:
+        raise RuntimeError("checkpoint detector compression is invalid")
+    return value
+
+
 def window_for_receiver(receiver_id):
     matches = [entry for entry in WINDOW if entry["receiver_id"] == int(receiver_id)]
     if len(matches) != 1:

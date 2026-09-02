@@ -33,6 +33,24 @@ from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRES
 from opencood.tools.dualcmp.eval_tracking_ddp import evaluate_tracking_model_ddp
 
 LOSS_KEYS = ("L_det", "L_exist", "L_box", "L_velocity")
+UNUSED_DETECTOR_PREFIXES = ("graph_sage_net.", "post_graph_cls_head.",
+                            "post_graph_reg_head.")
+OFFICIAL_DETECTOR_ACTIVE_KEYS = 243
+OFFICIAL_DETECTOR_PATH = Path("pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth")
+OFFICIAL_DETECTOR_SHA256 = "60e9e84e014889e93ced338e95f3c58b2a1a6a0d47f55f6b5da7bf28ad9c920b"
+PHASE_A_SOURCES = (
+    "opencood/data_utils/dualcmp_dataloader.py",
+    "opencood/data_utils/v2v4real/datasets/dualcmp_sequence_dataset.py",
+    "opencood/loss/dualcmp_loss.py",
+    "opencood/models/dualcmp/model.py",
+    "opencood/models/dualcmp/state.py",
+    "opencood/models/dualcmp/tracker.py",
+    "opencood/tools/dualcmp/ab3dmot_metrics.py",
+    "opencood/tools/dualcmp/eval_tracking_ddp.py",
+    "opencood/tools/dualcmp/online.py",
+    "opencood/tools/dualcmp/protocol.py",
+    "opencood/tools/dualcmp/train_tracking_ddp.py",
+)
 CSV_FIELDS = ("kind", "split", "epoch", "global_step", "global_samples", "lr_trunk", "lr_heads",
               "L_det", "L_exist", "L_box", "L_velocity", "L_total",
               "test_MOTA", "test_AMOTA", "test_sAMOTA", "test_recall", "test_precision",
@@ -56,6 +74,18 @@ def _required_code_sha(value=None):
     source_sha = os.environ.get("DUALCMP_CODE_SHA") if value is None else value
     if not source_sha or not _SHA1_RE.match(source_sha):
         raise EnvironmentError("DUALCMP_CODE_SHA must be a 40-character hexadecimal checkpoint commit SHA")
+    root = Path(__file__).resolve().parents[3]
+    head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=str(root)
+    ).decode("utf-8").strip()
+    dirty = subprocess.check_output(
+        ["git", "status", "--porcelain", "--", *PHASE_A_SOURCES],
+        cwd=str(root),
+    ).decode("utf-8").strip()
+    if source_sha.lower() != head.lower() or dirty:
+        raise RuntimeError(
+            "formal Phase A requires DUALCMP_CODE_SHA=HEAD and clean Phase-A sources"
+        )
     return source_sha.lower()
 
 
@@ -86,15 +116,22 @@ def _hypes(path, args=None):
     detector_weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
     label_root = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
     full_data = bool(args is not None and args.full_data)
-    if not root or not (phase_a_weights or detector_weights) or not label_root:
-        raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, and either DUALCMP_PHASE_A_INIT_WEIGHTS or DUALCMP_DETECTOR_WEIGHTS are required")
+    allow_full_model_init = bool(args is not None and args.allow_full_model_init)
+    if phase_a_weights and full_data and not allow_full_model_init:
+        raise RuntimeError("formal full-data Phase A rejects DUALCMP_PHASE_A_INIT_WEIGHTS")
+    if not root or not label_root or not (detector_weights or (phase_a_weights and allow_full_model_init)):
+        raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, and DUALCMP_DETECTOR_WEIGHTS are required")
     if phase_a_weights and detector_weights:
         raise EnvironmentError("set only one Phase-A initialization checkpoint")
+    if detector_weights and Path(detector_weights).resolve() != OFFICIAL_DETECTOR_PATH.resolve():
+        raise RuntimeError("Phase A accepts only the frozen official CMP detector checkpoint")
+    if int(getattr(args, "detector_compression", 256)) != 256:
+        raise RuntimeError("formal Phase A requires detector compression 256")
     split = args.data_split if full_data else "test"
     hypes = load_yaml(path)
     hypes["root_dir"] = str(Path(root) / split)
     hypes["validate_dir"] = hypes["root_dir"]
-    hypes["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    hypes["model"]["args"]["compression"] = int(getattr(args, "detector_compression", 256))
     hypes["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
         "stage": "tracking", "tracking_frames": 3, "runtime_only": False,
         "runtime_forbid_gt": True, "receiver_ids": [0, 1], "frame_period_s": 0.1,
@@ -111,6 +148,23 @@ def _hypes(path, args=None):
             "window": list(WINDOW), "tracking_label_root": label_root,
         })
     return hypes, Path(phase_a_weights or detector_weights), bool(phase_a_weights)
+
+
+def _load_official_detector(detector, checkpoint):
+    if _sha256_file(checkpoint) != OFFICIAL_DETECTOR_SHA256:
+        raise RuntimeError("official CMP detector checkpoint SHA256 mismatch")
+    payload = torch.load(str(checkpoint), map_location="cpu")
+    state = payload.get("model", payload.get("model_state_dict", payload))
+    if not isinstance(state, dict):
+        raise RuntimeError("official detector checkpoint must contain a state dictionary")
+    state = {(key[7:] if key.startswith("module.") else key): value
+             for key, value in state.items()}
+    ignored = sorted(key for key in state if key.startswith(UNUSED_DETECTOR_PREFIXES))
+    active = {key: value for key, value in state.items() if key not in ignored}
+    if len(ignored) != 16 or len(active) != OFFICIAL_DETECTOR_ACTIVE_KEYS:
+        raise RuntimeError("official detector must contain exactly 243 active and 16 unused forward keys")
+    detector.load_state_dict(active, strict=True)
+    return ignored
 
 
 def _optimizer(model, initial_lr, max_lr, weight_decay):
@@ -219,8 +273,9 @@ def train(args):
         proposal_nms_thresh=hypes["postprocess"]["nms_thresh"],
         emission_threshold=hypes["postprocess"]["target_args"]["score_threshold"],
     ).to(device)
-    init_payload = torch.load(str(init_weights), map_location="cpu")
-    if full_model_init:
+    ignored_unused_keys = []
+    if not args.resume and full_model_init:
+        init_payload = torch.load(str(init_weights), map_location="cpu")
         init_state = init_payload.get(
             "model", init_payload.get("model_state_dict", init_payload)
         )
@@ -229,8 +284,8 @@ def train(args):
             for key, value in init_state.items()
         }
         model.load_state_dict(init_state, strict=True)
-    else:
-        model.detector.load_state_dict(init_payload, strict=True)
+    elif not args.resume:
+        ignored_unused_keys = _load_official_detector(model.detector, init_weights)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                 broadcast_buffers=False)
     criterion = DualCmpLoss({"detector": hypes["loss"]["args"]}).to(device)
@@ -261,13 +316,28 @@ def train(args):
             raise RuntimeError("resume scheduler total_steps disagrees with the requested formal epoch budget")
         scheduler.load_state_dict(resume_payload["scheduler"])
         start_epoch, step = int(resume_payload["epoch"]), int(resume_payload["step"])
+        previous = resume_payload.get("provenance")
+        required = ("source_sha", "detector_checkpoint_sha256", "detector_compression",
+                    "active_loaded_keys", "ignored_unused_keys",
+                    "tracker_initialization")
+        if not isinstance(previous, dict) or any(key not in previous for key in required):
+            raise RuntimeError("resume checkpoint is missing formal detector initialization provenance")
+        if previous["source_sha"] != provenance["source_sha"]:
+            raise RuntimeError("formal Phase A resume requires the original source commit")
+        provenance.update({key: previous[key] for key in required})
     if rank == 0:
         output.mkdir(parents=True, exist_ok=bool(args.resume))
         provenance.update({"dataset_samples": len(dataset), "steps_per_epoch": len(loader),
                            "per_rank_batch": args.batch_size, "global_batch": args.batch_size * world_size,
                            "workers_per_rank": args.workers, "initial_lr": args.lr, "max_lr": args.max_lr,
-                           "init_checkpoint_sha256": _sha256_file(init_weights),
-                           "init_kind": "phase-a-model" if full_model_init else "detector"})
+                           "init_kind": "resume" if args.resume else (
+                               "phase-a-model" if full_model_init else "official-detector")})
+        if not args.resume:
+            provenance.update({"detector_compression": int(args.detector_compression),
+                               "detector_checkpoint_sha256": _sha256_file(init_weights),
+                               "active_loaded_keys": OFFICIAL_DETECTOR_ACTIVE_KEYS,
+                               "ignored_unused_keys": ignored_unused_keys,
+                               "tracker_initialization": "random"})
         if args.resume:
             provenance["resume_checkpoint_sha256"] = _sha256_file(args.resume)
         (output / "config.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
@@ -362,8 +432,8 @@ def train(args):
                        "initial_lr": args.lr, "max_lr": args.max_lr,
                        "weight_decay": args.weight_decay,
                        "sequence_augmentation": args.full_data,
-                       "init_checkpoint_sha256": _sha256_file(init_weights),
-                       "init_kind": "phase-a-model" if full_model_init else "detector"})
+                       "init_kind": "resume" if args.resume else (
+                           "phase-a-model" if full_model_init else "official-detector")})
     report = {"steps": step,
               "loss": dict(zip(LOSS_KEYS + ("L_total",), last or [])),
               "provenance": provenance, "peak_memory_mib": peak_memory,
@@ -395,6 +465,8 @@ def main():
                         help="JDT3D-aligned initial tracking-head LR")
     parser.add_argument("--max-lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--detector-compression", type=int, default=256)
+    parser.add_argument("--allow-full-model-init", action="store_true")
     parser.add_argument("--batch-size", type=int, default=4,
                         help="independent T=3 clips per GPU")
     parser.add_argument("--workers", type=int, default=8)

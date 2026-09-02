@@ -25,9 +25,9 @@ from opencood.loss.dualcmp_loss import DualCmpLoss
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.protocol import (
-    DETECTOR_COMPRESSION,
     FORECAST_WINDOW,
     FORECAST_SAMPLES,
+    checkpoint_detector_compression,
 )
 from opencood.tools.dualcmp.train_tracking_ddp import _sha256_file, _assert_sync
 
@@ -111,10 +111,12 @@ def _hypes(path, args=None):
         )
     full_data = bool(args is not None and args.full_data)
     split = args.data_split if full_data else "test"
+    tracker_payload = torch.load(tracker_weights, map_location="cpu")
+    detector_compression = checkpoint_detector_compression(tracker_payload)
     h = load_yaml(path)
     h["root_dir"] = str(Path(root) / split)
     h["validate_dir"] = h["root_dir"]
-    h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    h["model"]["args"]["compression"] = detector_compression
     h["fusion"] = {
         "args": {
             "stage": "forecast",
@@ -137,7 +139,7 @@ def _hypes(path, args=None):
         h["fusion"]["args"].update({
             "tracking_label_root": labels, "window": list(FORECAST_WINDOW),
         })
-    return h, tracker_weights, mtr_weights
+    return h, tracker_weights, mtr_weights, tracker_payload, detector_compression
 
 
 def main():
@@ -167,7 +169,9 @@ def main():
     rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
-    h, tracker_weights, mtr_weights = _hypes(args.hypes, args)
+    h, tracker_weights, mtr_weights, payload, detector_compression = _hypes(
+        args.hypes, args
+    )
     dataset = DualCMPSequenceDataset(h, train=True)
     if not args.full_data and len(dataset) != FORECAST_SAMPLES:
         raise RuntimeError("forecast protocol requires exactly 16 samples")
@@ -195,7 +199,6 @@ def main():
         h["preprocess"]["cav_lidar_range"],
         forecast_args=forecast_args,
     ).to(device)
-    payload = torch.load(tracker_weights, map_location="cpu")
     state = payload.get("model", payload.get("model_state_dict", payload))
     state = {
         (key[7:] if key.startswith("module.") else key): value
@@ -382,8 +385,10 @@ def main():
         "mtr_checkpoint_iter": mtr_payload.get("it"),
         "evidence_initialization": "official_mtr_object_attention",
         "temporal_attention_unchanged": True,
+        "detector_compression": detector_compression,
     }
     provenance = _provenance()
+    provenance["detector_compression"] = detector_compression
     provenance["phase_a_checkpoint_sha256"] = _sha256_file(tracker_weights)
     provenance["phase_a_source_provenance"] = (
         payload.get("provenance", {}).get("source_sha")

@@ -131,3 +131,18 @@
 - Two-GPU stop/resume acceptance completed 2 epochs/44 steps with 12 CSV rows,
   no duplicate keys, full optimizer/scheduler state, and test MOTA
   `0.9715/0.9778`. No loss, metric, or threshold was changed.
+
+## 2026-09-02 — Paper-clean Phase-A initialization
+
+- Stopped the full-tracker-initialized run after epoch 2: its starting MOTA
+  came from a checkpoint trained on the same fixed test window and is not a
+  paper-clean initialization.
+- Formal Phase A uses only the official CMP V2V4Real train-split detector,
+  compression 256, while all tracker parameters are random. The loader
+  strict-loads 243 active keys and explicitly verifies the 16 unused official
+  graph/post-graph keys.
+- Two-GPU checks passed on the fixed window and one full-train step; the latter
+  used B4/W8 and 20.34 GiB/GPU with a 35,040-step formal scheduler.
+- Phase B and Phase C then strict-loaded compression 256 and completed two-GPU
+  forward, loss, backward, DDP sync and checkpoint output. Phase C used
+  15.00 GiB/GPU with nonzero forecast-to-source and detector gradients.

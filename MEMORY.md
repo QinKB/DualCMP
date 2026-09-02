@@ -47,6 +47,12 @@
 - Phase-A CSV/test/resume integration passed a two-GPU two-epoch fixed-window
   run: epoch MOTA `0.9715/0.9778`, no duplicate CSV keys, scheduler budget
   preserved at 44 steps. Restart the formal 20-epoch run from initialization.
+- Paper Phase-A initialization is official CMP CoBEVT compression-256 detector
+  only: 243 active keys strict-loaded, exactly 16 officially unused graph keys
+  ignored, checkpoint SHA256 verified, tracker random. Never initialize a
+  paper run from `train-track-bind-s20260831`, which saw the fixed test window.
+- Detector compression is checkpoint provenance shared by Phase B, Phase C,
+  both evaluators, and online inference; do not restore a fixed global value.
 - Formal schedules are source-backed and epoch-based: Phase A uses JDT3D's
   20-epoch T=3 one-cycle cosine; Phase B uses CMP/MTR's 30 epochs and
   22/24/26/28 milestones; Phase C uses UniAD/UniV2X's 20-epoch warmup-cosine.

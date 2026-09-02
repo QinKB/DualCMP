@@ -23,7 +23,7 @@ from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.ab3dmot_metrics import tracking_frame_prediction
-from opencood.tools.dualcmp.protocol import AUDIT_DENOMINATORS, AUDIT_THRESHOLDS, DETECTOR_COMPRESSION, METRIC_THRESHOLDS, WINDOW, WINDOW_FRAMES
+from opencood.tools.dualcmp.protocol import AUDIT_DENOMINATORS, AUDIT_THRESHOLDS, METRIC_THRESHOLDS, WINDOW, WINDOW_FRAMES, checkpoint_detector_compression
 
 _SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -361,7 +361,10 @@ def main():
     hypes = load_yaml(args.hypes)
     hypes["root_dir"] = str(Path(os.environ["V2V4REAL_ROOT"]) / "test")
     hypes["validate_dir"] = hypes["root_dir"]
-    hypes["model"]["args"]["compression"] = DETECTOR_COMPRESSION
+    checkpoint_payload = torch.load(args.checkpoint, map_location="cpu")
+    hypes["model"]["args"]["compression"] = checkpoint_detector_compression(
+        checkpoint_payload
+    )
     hypes["fusion"] = {"args": {"tracking_label_root": os.environ["DUALCMP_TRACKING_LABEL_ROOT"]}}
     if args.evaluate_output:
         import json

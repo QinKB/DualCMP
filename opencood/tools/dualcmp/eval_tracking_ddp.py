@@ -25,10 +25,10 @@ from opencood.tools.dualcmp.online import (
 )
 from opencood.tools.dualcmp.protocol import (
     AUDIT_THRESHOLDS,
-    DETECTOR_COMPRESSION,
     METRIC_THRESHOLDS,
     WINDOW,
     WINDOW_FRAMES,
+    checkpoint_detector_compression,
 )
 
 
@@ -45,7 +45,6 @@ def evaluate_tracking_model_ddp(model, hypes, device, root, labels):
     h = dict(hypes)
     h["root_dir"] = str(Path(root) / "test")
     h["validate_dir"] = h["root_dir"]
-    h["model"]["args"]["compression"] = DETECTOR_COMPRESSION
     h["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
         "stage": "tracking", "tracking_frames": 3, "runtime_only": True,
         "runtime_forbid_gt": True, "receiver_ids": [entry["receiver_id"]],
@@ -143,6 +142,7 @@ def main():
     device = torch.device("cuda", local_rank)
     h = load_yaml("opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml")
     payload = torch.load(args.checkpoint, map_location="cpu")
+    h["model"]["args"]["compression"] = checkpoint_detector_compression(payload)
     state = payload.get("model", payload.get("model_state_dict", payload))
     forecast_args = None
     if any((key[7:] if key.startswith("module.") else key).startswith("forecast_head.") for key in state):
