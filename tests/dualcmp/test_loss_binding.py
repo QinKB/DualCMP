@@ -25,11 +25,12 @@ def _output(runtime_id, exist_logit, box, velocity):
             "track_velocity": velocity}
 
 
-def _target(actor_id, box, velocity):
+def _target(actor_id, box, velocity, velocity_valid=True):
     return {"fused_label_dict": {}, "current_mask": torch.tensor([[True]]),
             "current_boxes": box.reshape(1, 1, 7),
             "actor_ids": torch.tensor([[actor_id]]),
-            "current_velocity": velocity.reshape(1, 1, 2)}
+            "current_velocity": velocity.reshape(1, 1, 2),
+            "velocity_mask": torch.tensor([[velocity_valid]])}
 
 
 def test_loss_binding_keeps_disappeared_runtime_identity_until_runtime_reuse():
@@ -62,3 +63,19 @@ def test_loss_binding_keeps_disappeared_runtime_identity_until_runtime_reuse():
     assert result["match_count"] == 3
     assert frame2_logit.grad.item() > 0.0
     assert frame4_box.grad.norm() > 0.0 and frame4_velocity.grad.norm() > 0.0
+
+
+def test_loss_ignores_newborn_velocity_without_causal_difference():
+    criterion = DualCmpLoss({"detector": {"pos_cls_weight": 1.0,
+                                           "cls_weight": 1.0, "reg": 2.0}})
+    criterion.detector_loss = _DetectorOnlyForBindingTest()
+    box = torch.tensor([1., 0., 0., 1., 1., 2., 0.])
+    velocity = torch.tensor([3., 4.]).reshape(1, 1, 2).requires_grad_()
+    result = criterion(
+        [_output(10, torch.tensor([[0.]], requires_grad=True),
+                 box.reshape(1, 1, 7).requires_grad_(), velocity)],
+        [_target(101, box, torch.zeros(2), velocity_valid=False)],
+    )
+    result["total_loss"].backward()
+    assert result["L_velocity"].item() == 0.0
+    assert velocity.grad is None

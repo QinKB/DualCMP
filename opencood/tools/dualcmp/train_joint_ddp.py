@@ -32,6 +32,9 @@ from opencood.tools.dualcmp.protocol import (
     checkpoint_detector_compression,
 )
 from opencood.tools.dualcmp.train_tracking_ddp import _assert_sync, _sha256_file
+from opencood.tools.dualcmp.train_tracking_ddp import _append_csv, _atomic_save, _trim_csv_after_checkpoint
+from opencood.tools.dualcmp.eval_tracking_ddp import evaluate_tracking_model_ddp, evaluate_tracking_test_model_ddp
+from opencood.tools.dualcmp.eval_forecast_ddp import evaluate_forecast_test_model_ddp
 from opencood.tools.train_utils import to_device
 
 
@@ -40,8 +43,25 @@ SOURCES = (
     "opencood/loss/dualcmp_loss.py",
     "opencood/models/dualcmp/model.py",
     "opencood/models/point_pillar_fax.py",
+    "opencood/tools/dualcmp/ab3dmot_metrics.py",
+    "opencood/tools/dualcmp/eval_forecast_ddp.py",
+    "opencood/tools/dualcmp/eval_tracking_ddp.py",
+    "opencood/tools/dualcmp/forecast_metrics.py",
+    "opencood/tools/dualcmp/protocol.py",
     "opencood/tools/dualcmp/train_joint_ddp.py",
 )
+FORECAST_METRICS = ("minADE_1s", "minADE_3s", "minADE_5s",
+                    "minFDE_1s", "minFDE_3s", "minFDE_5s",
+                    "MR_3.6", "count")
+TRACKING_METRICS = ("MOTA", "AMOTA", "sAMOTA", "tracking_recall",
+                    "tracking_precision", "identity_switches", "fragments")
+CSV_FIELDS = (("kind", "split", "epoch", "global_step", "global_samples",
+               "lr_detector", "lr_tracking", "lr_forecast",
+               "L_det", "L_track", "L_pred", "L_total")
+              + tuple("test_track_" + key for key in TRACKING_METRICS)
+              + ("test_track_timelines", "test_track_frames",)
+              + tuple("test_forecast_" + key for key in FORECAST_METRICS)
+              + ("test_prediction_keys", "test_complete", "test_eligible_complete"))
 
 
 def _provenance():
@@ -54,23 +74,26 @@ def _provenance():
     if code_sha:
         if not re.match(r"^[0-9a-fA-F]{40}$", code_sha) or code_sha.lower() != head.lower() or dirty:
             raise RuntimeError("DUALCMP_CODE_SHA requires matching clean Phase-C sources")
-        return {"source_state": "clean", "source_sha": code_sha.lower()}
+        return {"source_state": "clean", "source_sha": code_sha.lower(),
+                "protocol_sha256": _sha256_file(Path(__file__).with_name("protocol.py"))}
     digest = hashlib.sha256()
     for relative in sorted(SOURCES):
         digest.update(relative.encode() + b"\0")
         digest.update((root / relative).read_bytes())
     return {"source_state": "dirty-smoke", "base_sha": head,
-            "source_tree_sha256": digest.hexdigest()}
+            "source_tree_sha256": digest.hexdigest(),
+            "protocol_sha256": _sha256_file(Path(__file__).with_name("protocol.py"))}
 
 
 def _hypes(path, split, full_data):
     root = os.environ.get("V2V4REAL_ROOT")
     weights = os.environ.get("DUALCMP_INIT_WEIGHTS")
     labels = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
-    if not root or not weights:
-        raise EnvironmentError("V2V4REAL_ROOT and DUALCMP_INIT_WEIGHTS are required")
-    if not full_data and not labels:
-        raise EnvironmentError("fixed acceptance also requires DUALCMP_TRACKING_LABEL_ROOT")
+    if not root or not weights or not labels:
+        raise EnvironmentError(
+            "V2V4REAL_ROOT, DUALCMP_INIT_WEIGHTS, and "
+            "DUALCMP_TRACKING_LABEL_ROOT are required"
+        )
     payload = torch.load(str(weights), map_location="cpu")
     detector_compression = checkpoint_detector_compression(payload)
     h = load_yaml(path)
@@ -147,10 +170,22 @@ def main():
     parser.add_argument("--lambda-pred", type=float, default=1e-4)
     parser.add_argument("--warmup-steps", type=int, default=500)
     parser.add_argument("--min-lr-ratio", type=float, default=1e-3)
-    parser.add_argument("--save-every", type=int, default=2)
+    parser.add_argument("--save-every", type=int, default=1)
+    parser.add_argument("--log-every", type=int, default=100)
+    parser.add_argument("--eval-every", type=int, default=1)
+    parser.add_argument("--resume")
+    parser.add_argument("--stop-after-epoch", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260901)
     parser.add_argument("--amp", action="store_true")
     args = parser.parse_args()
+    if args.log_every < 1 or args.save_every < 1 or args.eval_every < 1:
+        raise ValueError("Phase C logging, saving, and evaluation intervals must be positive")
+    if args.full_data and (args.save_every != 1 or args.eval_every != 1):
+        raise ValueError("formal Phase C requires save_every=1 and eval_every=1")
+    if args.resume and Path(args.resume).resolve().parent != Path(args.output_dir).resolve():
+        raise ValueError("--resume checkpoint must belong to --output-dir")
+    if args.full_data and not os.environ.get("DUALCMP_CODE_SHA"):
+        raise EnvironmentError("formal full-data Phase C requires DUALCMP_CODE_SHA")
     if min(args.base_lr, args.detector_lr_scale, args.forecast_lr_scale,
            args.lambda_det, args.lambda_track, args.lambda_pred) <= 0:
         raise ValueError("learning rates, scales, and loss weights must be positive")
@@ -192,6 +227,7 @@ def main():
     model.train()
     model = DDP(model, device_ids=[local_rank], broadcast_buffers=False)
     criterion = DualCmpLoss({"detector": h["loss"]["args"]}).to(device)
+    run_provenance = _provenance()
     total_steps = (
         args.epochs * len(loader)
         if args.full_data else (args.max_steps or args.epochs * len(loader))
@@ -207,16 +243,39 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, multiplier)
     output = Path(args.output_dir)
+    start_epoch = step = global_samples = 0
+    resume_payload = None
+    if args.resume:
+        resume_payload = torch.load(args.resume, map_location="cpu")
+        if not isinstance(resume_payload, dict) or any(key not in resume_payload for key in ("model", "optimizer", "scheduler", "epoch", "step", "provenance")):
+            raise RuntimeError("resume checkpoint must contain model, optimizer, scheduler, epoch, step, and provenance")
+        if int(resume_payload["provenance"].get("total_steps", -1)) != total_steps:
+            raise RuntimeError("resume scheduler budget disagrees with requested 20-epoch schedule")
+        if int(resume_payload["scheduler"].get("last_epoch", -1)) != int(resume_payload["step"]):
+            raise RuntimeError("resume scheduler step does not match checkpoint step")
+        previous = resume_payload["provenance"]
+        source_key = "source_sha" if "source_sha" in run_provenance else "source_tree_sha256"
+        if previous.get(source_key) != run_provenance.get(source_key):
+            raise RuntimeError("Phase C resume requires the original source state")
+        if previous.get("init_checkpoint_sha256") != _sha256_file(init_weights):
+            raise RuntimeError("Phase C resume requires the original Phase-B checkpoint")
+        model.module.load_state_dict(resume_payload["model"], strict=True)
+        optimizer.load_state_dict(resume_payload["optimizer"]); scheduler.load_state_dict(resume_payload["scheduler"])
+        start_epoch, step, global_samples = int(resume_payload["epoch"]), int(resume_payload["step"]), int(resume_payload.get("global_samples", 0))
     if rank == 0:
-        output.mkdir(parents=True, exist_ok=False)
+        output.mkdir(parents=True, exist_ok=bool(args.resume))
+        if args.resume:
+            _trim_csv_after_checkpoint(output / "metrics.csv", step, CSV_FIELDS)
     dist.barrier()
-    step = epoch = 0
+    epoch = start_epoch
     started = time.monotonic()
     last = None
     forecast_to_source_grad = None
     joint_detector_grad = None
-    while (not args.max_steps) or step < args.max_steps:
+    while epoch < args.epochs:
         sampler.set_epoch(epoch)
+        epoch_totals = np.zeros(4, dtype=np.float64); epoch_count = 0
+        log_totals = np.zeros(4, dtype=np.float64); log_count = 0
         for batch in loader:
             batch = to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
@@ -267,20 +326,62 @@ def main():
                 raise FloatingPointError("non-finite Phase-C loss")
             dist.all_reduce(values, op=dist.ReduceOp.SUM)
             last = (values / dist.get_world_size()).cpu().tolist()
+            batch_count = len(batch["scene_receiver_keys"]) * dist.get_world_size()
+            epoch_totals += np.asarray(last) * batch_count; epoch_count += batch_count
+            log_totals += np.asarray(last) * batch_count; log_count += batch_count
+            global_samples += batch_count
+            if step % args.log_every == 0 and rank == 0:
+                row = dict(zip(("L_det", "L_track", "L_pred", "L_total"), (log_totals / log_count).tolist()))
+                row.update({"kind": "step", "split": "train", "epoch": epoch + 1, "global_step": step,
+                            "global_samples": global_samples, "lr_detector": optimizer.param_groups[0]["lr"],
+                            "lr_tracking": optimizer.param_groups[1]["lr"], "lr_forecast": optimizer.param_groups[2]["lr"]})
+                _append_csv(output / "metrics.csv", row, CSV_FIELDS); print(json.dumps(row), flush=True)
+                log_totals[:] = 0; log_count = 0
             if args.max_steps and step >= args.max_steps:
                 break
-        epoch += 1
-        if rank == 0 and args.save_every and epoch % args.save_every == 0:
-            torch.save(
-                {"model": model.module.state_dict(), "epoch": epoch,
-                 "step": step, "provenance": _provenance()},
-                output / ("checkpoint_epoch_%03d.pt" % epoch),
+        if args.max_steps and step >= args.max_steps:
+            break
+        provenance = dict(run_provenance); provenance.update({"detector_compression": detector_compression,
+            "init_checkpoint_sha256": _sha256_file(init_weights), "total_steps": total_steps})
+        checkpoint = {"model": model.module.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                      "epoch": epoch + 1, "step": step, "global_samples": global_samples, "provenance": provenance}
+        if rank == 0 and (epoch + 1) % args.save_every == 0:
+            _atomic_save(checkpoint, output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
+            _atomic_save(checkpoint, output / "checkpoint.pt")
+        dist.barrier()
+        tracking = forecast = None
+        if (epoch + 1) % args.eval_every == 0:
+            tracking = (evaluate_tracking_test_model_ddp if args.full_data else evaluate_tracking_model_ddp)(model, h, device, os.environ["V2V4REAL_ROOT"], os.environ["DUALCMP_TRACKING_LABEL_ROOT"])
+            forecast = evaluate_forecast_test_model_ddp(
+                model, h, device, os.environ["V2V4REAL_ROOT"],
+                os.environ["DUALCMP_TRACKING_LABEL_ROOT"],
+                batch_size=args.batch_size, workers=args.workers,
+                full_test=args.full_data,
             )
-        if (args.max_steps and step >= args.max_steps) or (not args.max_steps and epoch >= args.epochs):
+        if rank == 0:
+            row = dict(zip(("L_det", "L_track", "L_pred", "L_total"), (epoch_totals / epoch_count).tolist()))
+            row.update({"kind": "epoch", "split": "train+test", "epoch": epoch + 1, "global_step": step,
+                        "global_samples": global_samples, "lr_detector": optimizer.param_groups[0]["lr"],
+                        "lr_tracking": optimizer.param_groups[1]["lr"], "lr_forecast": optimizer.param_groups[2]["lr"]})
+            if tracking is not None:
+                row.update({"test_track_" + key: tracking["metrics"][key]
+                            for key in TRACKING_METRICS})
+                row.update({"test_track_timelines": tracking.get("timeline_count", ""),
+                            "test_track_frames": tracking.get("frame_count", "")})
+                row.update({"test_forecast_" + key: forecast["model"][key]
+                            for key in FORECAST_METRICS})
+                row.update({"test_prediction_keys": forecast["coverage"]["prediction_keys"],
+                            "test_complete": forecast["coverage"]["complete"],
+                            "test_eligible_complete": forecast["coverage"]["eligible_complete"]})
+                (output / ("test_tracking_epoch_%03d.json" % (epoch + 1))).write_text(json.dumps(tracking, indent=2), encoding="utf-8")
+                (output / ("test_forecast_epoch_%03d.json" % (epoch + 1))).write_text(json.dumps(forecast, indent=2), encoding="utf-8")
+            _append_csv(output / "metrics.csv", row, CSV_FIELDS); print(json.dumps(row), flush=True)
+        epoch += 1
+        if args.stop_after_epoch and epoch >= args.stop_after_epoch:
             break
     _assert_sync(model.module)
     elapsed = max(time.monotonic() - started, 1e-9)
-    provenance = _provenance()
+    provenance = dict(run_provenance)
     provenance.update({"detector_compression": detector_compression,
                        "init_checkpoint_sha256": _sha256_file(init_weights),
                        "init_provenance": payload.get("provenance") if isinstance(payload, dict) else None})
@@ -309,7 +410,6 @@ def main():
     }
     if rank == 0:
         checkpoint = output / "checkpoint.pt"
-        torch.save({"model": model.module.state_dict(), "provenance": provenance}, checkpoint)
         report["checkpoint_sha256"] = _sha256_file(checkpoint)
         (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report))

@@ -16,7 +16,7 @@ test labels: ../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test
 ```
 
 Full-train supervision comes from target-only raw YAML. Evaluator-native
-AB3DMOT labels are used only at the fixed test metric boundary.
+AB3DMOT labels are used only at the complete test metric boundary.
 
 ## Formal epoch schedules
 
@@ -47,7 +47,7 @@ DUALCMP_CODE_SHA=$(git rev-parse HEAD) \
 env -u DUALCMP_PHASE_A_INIT_WEIGHTS \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_tracking_ddp \
-  --output-dir runs/train-a-cmp256-full \
+  --output-dir runs/train-a-cmp256-full-r2 \
   --full-data --data-split train --epochs 20 \
   --detector-compression 256 \
   --batch-size 4 --workers 8 \
@@ -69,14 +69,25 @@ Start only after Phase A finishes and passes fresh evaluation.
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
 DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test \
-DUALCMP_TRACKER_WEIGHTS=runs/train-a-cmp256-full/checkpoint.pt \
-DUALCMP_MTR_WEIGHTS=../data/V2V4Real/derived/CMP/runs/mtr_noagg_epoch2_test_20260807/checkpoint_epoch_5_snapshot.pth \
+DUALCMP_TRACKER_WEIGHTS=runs/train-a-cmp256-full-r2/checkpoint.pt \
+DUALCMP_CODE_SHA=$(git rev-parse HEAD) \
+env -u DUALCMP_MTR_WEIGHTS \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_forecast_ddp \
   --output-dir runs/train-b-full \
   --full-data --data-split train --epochs 30 \
-  --batch-size 4 --workers 8 --lr 1e-4 --save-every 5
+  --batch-size 4 --workers 8 --lr 1e-4 --log-every 100 --eval-every 1 --save-every 1
 ```
+
+Phase B copies the official CMP/MTR architecture, loss, intention queries and
+30-epoch schedule, but initializes every forecast and source-evidence parameter
+randomly. It never loads a V2V4Real-trained MTR checkpoint.
+
+All stages write globally synchronized numeric CSV columns every 100 optimizer
+steps and one global train row per epoch. Phase A adds complete-test AB3DMOT
+columns, Phase B adds complete-test CMP minADE/minFDE/MR columns, and Phase C
+adds both. Every epoch atomically saves model, optimizer, scheduler, epoch,
+global step, sample count, and provenance before evaluation.
 
 ## Phase C — full joint fine-tuning
 
@@ -87,7 +98,8 @@ updates detection, tracking, source representation, and forecast modules.
 CUDA_VISIBLE_DEVICES=0,1 \
 V2V4REAL_ROOT=../data/V2V4Real \
 DUALCMP_INIT_WEIGHTS=runs/train-b-full/checkpoint.pt \
-env -u DUALCMP_TRACKING_LABEL_ROOT \
+DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v2v4real_label/test \
+DUALCMP_CODE_SHA=$(git rev-parse HEAD) \
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.train_joint_ddp \
   --output-dir runs/train-c-full \
@@ -96,10 +108,10 @@ python -m torch.distributed.run --nproc_per_node=2 \
   --base-lr 1e-5 --detector-lr-scale 0.1 \
   --forecast-lr-scale 1 --weight-decay 0.01 \
   --lambda-det 1 --lambda-track 1 --lambda-pred 1e-4 \
-  --warmup-steps 500 --min-lr-ratio 1e-3 --save-every 2
+  --warmup-steps 500 --min-lr-ratio 1e-3 --log-every 100 --eval-every 1 --save-every 1
 ```
 
-## Fixed two-GPU evaluation
+## Complete two-GPU test evaluation
 
 ```bash
 export V2V4REAL_ROOT=../data/V2V4Real
@@ -108,12 +120,14 @@ export DUALCMP_TRACKING_LABEL_ROOT=../Reference/Code/CMP/AB3Dmot/scripts/KITTI/v
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.eval_forecast_ddp \
   --checkpoint runs/train-c-full/checkpoint.pt \
-  --output runs/train-c-full/forecast_metrics.json
+  --output runs/train-c-full/forecast_metrics.json \
+  --full-test --batch-size 4 --workers 8
 
 python -m torch.distributed.run --nproc_per_node=2 \
   -m opencood.tools.dualcmp.eval_tracking_ddp \
   --checkpoint runs/train-c-full/checkpoint.pt \
-  --output runs/train-c-full/tracking_metrics.json
+  --output runs/train-c-full/tracking_metrics.json \
+  --full-test
 ```
 
 Forecast uses the existing CMP 1/3/5-second minADE, minFDE, and MR. Tracking

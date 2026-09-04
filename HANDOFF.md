@@ -6,29 +6,26 @@
   global step/epoch CSV logging, epoch-end test metrics, and resumable optimizer
   state. Its model-only checkpoints are retained under
   `runs/phase-a-interrupted-no-csv-s20260902` but must not be resumed formally.
-- Phase-A now logs globally reduced losses every 100 steps to `metrics.csv`,
-  evaluates the fixed V2V4Real test protocol every epoch on both GPUs, and
-  atomically checkpoints model/optimizer/scheduler. A fresh 20-epoch restart is
-  next.
+- Phase A/B/C now log globally reduced numeric CSV columns every 100 steps and
+  global epoch means, atomically save resumable checkpoints every epoch, and
+  run complete two-GPU test metrics each epoch. A fresh formal Phase A at
+  `runs/train-a-cmp256-full-r2` is next.
 - A second non-paper attempt was stopped after epoch 2 because it initialized
   the full tracker from the fixed test-window overfit checkpoint. Formal Phase A
   now loads only the official train-split CMP detector (compression 256) and
   initializes all tracker parameters randomly.
 - Compression-256 propagation is checkpoint-driven through Phase B, Phase C,
   tracking/forecast evaluation, and online inference. Both later stages passed
-  two-GPU one-step integration; launch `runs/train-a-cmp256-full` next.
+  two-GPU one-step integration; launch `runs/train-a-cmp256-full-r2` next.
+- Formal Phase B must initialize all forecast/source-evidence parameters
+  randomly. The earlier epoch-5 local V2V4Real MTR snapshot was a development
+  aid with inconsistent naming and is rejected by the trainer.
+- Phase B starts forecast/source modules from a fixed random seed and rejects
+  `DUALCMP_MTR_WEIGHTS`; its 800-step two-GPU subset run demonstrated learning.
 - Phase-C joint integration is implemented and full-data launch schedules are
   frozen from local upstream configs: Phase A 20 epochs, Phase B 30 epochs,
   Phase C 20 epochs. Formal Phase A is the next running job; Phase B starts
   only after its fresh tracking evaluation.
-- Phase B is functionally accepted at clean commit `d2ee211`: official MTR
-  initialization, source-preserved evidence, main+dense loss, global DDP
-  normalization, frozen tracker, fresh forecast metrics and tracking
-  regression all passed on the fixed small subset.
-- Final artifact is `runs/train-official-global-s20260901/checkpoint.pt`, SHA256
-  `f9462989...eb710`, bound to clean source and evaluator provenance.
-- Next implementation phase is Phase C joint fine-tuning. Do not reopen Phase B
-  architecture or thresholds without new contradictory evidence.
 
 ## Verified
 
@@ -76,11 +73,19 @@
   `0.229/0.294/0.411` m, minFDE `0.185/0.379/0.982` m, and MR `0.0109`.
 - Tracking regression kept MOTA `0.961`, recall `0.9705`, precision `1.0`, IDS
   `9`, and fragments `24`; the historical tracker `overall_pass=false` remains.
+- Current lifecycle acceptance passed on both GPUs: A/B/C each completed
+  two-epoch stop/resume with continuous scheduler/step/sample state and no CSV
+  duplicates. Complete test evaluation covered 18 tracking timelines/3,986
+  frames and 3,626 forecast samples.
+- Random Phase-B forecast learning passed 800 steps on 16 samples: 5 s minADE
+  improved `11.194 -> 2.051` m and minFDE `20.845 -> 6.568` m without an MTR
+  checkpoint. MR improved to `0.6596`.
 
 ## Open
 
-- Run full Phase A on 14,018 T=3 clips with B4/GPU, W8/GPU and the JDT3D
-  20-epoch one-cycle schedule; then evaluate and run full Phase B for 30 epochs.
+- Commit the accepted lifecycle, then run formal Phase A from the official
+  detector and random tracker on 14,018 T=3 clips for 20 epochs. Phase B follows
+  for 30 epochs only after fresh full-test tracking metrics are reasonable.
 
 ## Risks
 

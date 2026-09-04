@@ -146,3 +146,24 @@
 - Phase B and Phase C then strict-loaded compression 256 and completed two-GPU
   forward, loss, backward, DDP sync and checkpoint output. Phase C used
   15.00 GiB/GPU with nonzero forecast-to-source and detector gradients.
+
+## 2026-09-02 — Removed hidden Phase-B MTR pretraining
+
+- Audit: the development snapshot named `epoch2_test` contains epoch 5 / step
+  2305 weights from a local V2V4Real training run and has no source provenance.
+- Change: formal Phase B now rejects `DUALCMP_MTR_WEIGHTS` and randomly
+  initializes all forecast/source-evidence parameters while retaining the
+  official CMP/MTR architecture, loss, intention queries and schedule.
+- Remaining: the two-GPU random-initialization overfit gate must run after
+  formal Phase A releases both GPUs.
+## 2026-09-04 — Formal logging lifecycle accepted
+
+- A/B/C two-GPU stop/resume produced continuous numeric CSV rows, complete
+  optimizer/scheduler checkpoints each epoch, and no duplicate keys.
+- Complete current-model test evaluation passed on 18 tracking timelines/3,986
+  frames and 3,626 forecast samples using existing AB3DMOT and CMP metrics.
+- Phase-B random forecast/source initialization completed the 800-step frozen
+  subset gate: 5 s minADE improved `11.194 -> 2.051` m, minFDE
+  `20.845 -> 6.568` m, and MR `0.8298 -> 0.6596`.
+- `velocity_mask` now excludes newborn placeholder velocities; two focused
+  regression tests passed. Full formal A/B/C training remains open.

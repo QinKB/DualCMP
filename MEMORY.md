@@ -37,6 +37,8 @@
 - A label oracle, syntax check, unit test or decreasing loss is not model
   acceptance. Every learned stage must reach real data, two-GPU training,
   checkpoint, fresh inference and authoritative metrics.
+- `velocity_mask` excludes newborn placeholder zero velocity without a prior
+  receiver frame; box/existence supervision remains active (two focused tests passed).
 - Existing runtime tracks must retain loss-local GT ownership while valid;
   disappeared tracks are negatives and cannot be rebound as newborn actors.
 - Do not tune or flatten tracking scores to game AMOTA. Preserve failed frozen
@@ -44,31 +46,32 @@
 
 ## Open
 
-- Phase-A CSV/test/resume integration passed a two-GPU two-epoch fixed-window
-  run: epoch MOTA `0.9715/0.9778`, no duplicate CSV keys, scheduler budget
-  preserved at 44 steps. Restart the formal 20-epoch run from initialization.
+- A/B/C lifecycle acceptance passed two-GPU stop/resume with numeric CSV,
+  continuous scheduler/step/sample state, no duplicate keys, and complete epoch
+  checkpoints. Complete test evaluation covers 18 tracking timelines/3,986
+  frames and 3,626 forecast samples.
 - Paper Phase-A initialization is official CMP CoBEVT compression-256 detector
   only: 243 active keys strict-loaded, exactly 16 officially unused graph keys
   ignored, checkpoint SHA256 verified, tracker random. Never initialize a
   paper run from `train-track-bind-s20260831`, which saw the fixed test window.
 - Detector compression is checkpoint provenance shared by Phase B, Phase C,
   both evaluators, and online inference; do not restore a fixed global value.
+- Formal Phase B reuses CMP/MTR code, loss, intention queries and schedule, not
+  V2V4Real-trained MTR weights. Forecast and source-evidence modules start from
+  the fixed random seed; stale `DUALCMP_MTR_WEIGHTS` must fail closed.
 - Formal schedules are source-backed and epoch-based: Phase A uses JDT3D's
   20-epoch T=3 one-cycle cosine; Phase B uses CMP/MTR's 30 epochs and
   22/24/26/28 milestones; Phase C uses UniAD/UniV2X's 20-epoch warmup-cosine.
 - Full-data gates passed with Phase A 14,018 clips, B4/W8, 1,752 steps/epoch,
   20.35 GiB/GPU; and Phase B 12,930 clips, B4/W8, 1,616 steps/epoch,
   6.26 GiB/GPU. `--max-steps` no longer changes a full-data scheduler.
-- Phase B is complete at clean source `d2ee211`; canonical artifacts are under
-  `runs/train-official-global-s20260901`. Coverage is 94 assigned/92 eligible;
-  the two one-history-step newborns remain explicitly uncovered.
-- Final forecast metrics are minADE `0.229/0.294/0.411` m, minFDE
-  `0.185/0.379/0.982` m and MR `0.0109`. Tracking regression is unchanged on
-  MOTA/recall/precision/IDS/fragments, while its older independent
-  `overall_pass=false` remains truthful.
-- The next open work is Phase C joint fine-tuning, not more Phase-B tuning.
-- The next execution is formal full-data Phase A, followed by Phase B; Phase C
-  follows only after both fresh evaluators pass.
+- Random Phase-B initialization learned on the frozen 16-sample gate in 800
+  two-GPU steps: 5 s minADE `11.194 -> 2.051` m, minFDE
+  `20.845 -> 6.568` m, and MR `0.8298 -> 0.6596`. This proves learning ability,
+  not full-split paper quality.
+- The next execution is a fresh formal full-data Phase A at
+  `runs/train-a-cmp256-full-r2`, followed by Phase B and Phase C only after each
+  preceding full-test gate is reasonable.
 
 ## Phase-B failure lessons
 

@@ -30,7 +30,10 @@ from opencood.loss.dualcmp_loss import DualCmpLoss
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.train_utils import to_device
 from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRESSION, TOTAL_CLIPS, WINDOW, WINDOW_FRAMES
-from opencood.tools.dualcmp.eval_tracking_ddp import evaluate_tracking_model_ddp
+from opencood.tools.dualcmp.eval_tracking_ddp import (
+    evaluate_tracking_model_ddp,
+    evaluate_tracking_test_model_ddp,
+)
 
 LOSS_KEYS = ("L_det", "L_exist", "L_box", "L_velocity")
 UNUSED_DETECTOR_PREFIXES = ("graph_sage_net.", "post_graph_cls_head.",
@@ -99,6 +102,22 @@ def _run_provenance(args, world_size, gpu_names):
             "workers_per_rank": int(args.workers),
             "window_frames": WINDOW_FRAMES, "clips_per_receiver": CLIPS_PER_RECEIVER,
             "total_clips": TOTAL_CLIPS, "window": list(WINDOW)}
+
+
+def _dirty_provenance(args, world_size, gpu_names):
+    root = Path(__file__).resolve().parents[3]
+    digest = hashlib.sha256()
+    for relative in sorted(PHASE_A_SOURCES):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update((root / relative).read_bytes())
+    return {"source_state": "dirty-smoke",
+            "base_sha": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=str(root)
+            ).decode().strip(),
+            "source_tree_sha256": digest.hexdigest(),
+            "protocol_sha256": _protocol_sha256(), "argv": list(sys.argv),
+            "world_size": world_size, "gpu_names": gpu_names,
+            "seed": int(args.seed)}
 
 
 def _init_distributed():
@@ -213,22 +232,22 @@ def _global_loss(loss, batch_size, device):
     return totals[:-1].cpu().tolist(), int(totals[-1].item())
 
 
-def _append_csv(path, row):
+def _append_csv(path, row, fieldnames=CSV_FIELDS):
     new_file = not path.exists()
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         if new_file:
             writer.writeheader()
-        writer.writerow({key: row.get(key, "") for key in CSV_FIELDS})
+        writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
-def _trim_csv_after_checkpoint(path, step):
+def _trim_csv_after_checkpoint(path, step, fieldnames=CSV_FIELDS):
     if not path.exists():
         return
     with path.open("r", newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows([row for row in rows if int(row.get("global_step") or 0) <= step])
 
@@ -248,12 +267,8 @@ def train(args):
     device = torch.device("cuda", local_rank)
     gpu_names = [None for _ in range(world_size)]
     dist.all_gather_object(gpu_names, torch.cuda.get_device_name(local_rank))
-    provenance = _run_provenance(args, world_size, gpu_names) if not args.dirty_smoke else {
-        "source_state": "dirty-smoke", "base_sha": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parents[3])
-        ).decode().strip(), "protocol_sha256": _protocol_sha256(),
-        "argv": list(sys.argv), "world_size": world_size, "gpu_names": gpu_names,
-    }
+    provenance = (_dirty_provenance(args, world_size, gpu_names)
+                  if args.dirty_smoke else _run_provenance(args, world_size, gpu_names))
     hypes, init_weights, full_model_init = _hypes(args.hypes, args)
     dataset = DualCMPSequenceDataset(hypes, train=True)
     per_receiver = {entry["receiver_id"]: 0 for entry in WINDOW}
@@ -317,13 +332,15 @@ def train(args):
         scheduler.load_state_dict(resume_payload["scheduler"])
         start_epoch, step = int(resume_payload["epoch"]), int(resume_payload["step"])
         previous = resume_payload.get("provenance")
-        required = ("source_sha", "detector_checkpoint_sha256", "detector_compression",
-                    "active_loaded_keys", "ignored_unused_keys",
-                    "tracker_initialization")
+        source_keys = (("source_sha",) if provenance.get("source_state") != "dirty-smoke"
+                       else ("base_sha", "source_tree_sha256"))
+        required = source_keys + ("detector_checkpoint_sha256", "detector_compression",
+                                  "active_loaded_keys", "ignored_unused_keys",
+                                  "tracker_initialization")
         if not isinstance(previous, dict) or any(key not in previous for key in required):
             raise RuntimeError("resume checkpoint is missing formal detector initialization provenance")
-        if previous["source_sha"] != provenance["source_sha"]:
-            raise RuntimeError("formal Phase A resume requires the original source commit")
+        if any(previous[key] != provenance[key] for key in source_keys):
+            raise RuntimeError("Phase A resume requires the original source state")
         provenance.update({key: previous[key] for key in required})
     if rank == 0:
         output.mkdir(parents=True, exist_ok=bool(args.resume))
@@ -385,13 +402,6 @@ def train(args):
                 log_count = 0
             if args.max_steps and step >= args.max_steps:
                 break
-        if log_count and rank == 0:
-            row = dict(zip(LOSS_KEYS + ("L_total",), [value / log_count for value in log_totals]))
-            row.update({"kind": "step", "split": "train", "epoch": epoch + 1, "global_step": step,
-                        "global_samples": global_samples, "lr_trunk": optimizer.param_groups[0]["lr"],
-                        "lr_heads": optimizer.param_groups[1]["lr"]})
-            _append_csv(output / "metrics.csv", row)
-            print(json.dumps(row), flush=True)
         if args.max_steps and step >= args.max_steps:
             break
         epoch_row = dict(zip(LOSS_KEYS + ("L_total",), [value / epoch_count for value in epoch_totals]))
@@ -402,19 +412,19 @@ def train(args):
                               "scheduler": scheduler.state_dict(), "epoch": epoch + 1, "step": step,
                               "global_samples": global_samples, "provenance": provenance}
         if rank == 0:
-            if args.save_every and (epoch + 1) % args.save_every == 0:
-                _atomic_save(checkpoint_payload, output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
+            _atomic_save(checkpoint_payload, output / ("checkpoint_epoch_%03d.pt" % (epoch + 1)))
             _atomic_save(checkpoint_payload, output / "checkpoint.pt")
         dist.barrier()
         if (epoch + 1) % args.eval_every == 0:
-            test_report = evaluate_tracking_model_ddp(model, hypes, device, os.environ["V2V4REAL_ROOT"],
-                                                      os.environ["DUALCMP_TRACKING_LABEL_ROOT"])
+            evaluator = evaluate_tracking_test_model_ddp if args.full_data else evaluate_tracking_model_ddp
+            test_report = evaluator(model, hypes, device, os.environ["V2V4REAL_ROOT"],
+                                    os.environ["DUALCMP_TRACKING_LABEL_ROOT"])
             if rank == 0:
                 metrics = test_report["metrics"]
                 epoch_row.update({"test_MOTA": metrics["MOTA"], "test_AMOTA": metrics["AMOTA"],
                                   "test_sAMOTA": metrics["sAMOTA"], "test_recall": metrics["tracking_recall"],
                                   "test_precision": metrics["tracking_precision"], "test_IDS": metrics["identity_switches"],
-                                  "test_fragments": metrics["fragments"], "test_overall_pass": test_report["audit"]["overall_pass"]})
+                                  "test_fragments": metrics["fragments"], "test_overall_pass": test_report.get("audit", {}).get("overall_pass", "")})
                 (output / ("test_metrics_epoch_%03d.json" % (epoch + 1))).write_text(json.dumps(test_report, indent=2), encoding="utf-8")
         if rank == 0:
             _append_csv(output / "metrics.csv", epoch_row)
@@ -479,7 +489,12 @@ def main():
     parser.add_argument("--stop-after-epoch", type=int, default=0)
     parser.add_argument("--dirty-smoke", action="store_true")
     parser.add_argument("--amp", action="store_true")
-    train(parser.parse_args())
+    args = parser.parse_args()
+    if args.log_every < 1 or args.save_every != 1 or args.eval_every != 1:
+        raise ValueError("Phase A requires log_every>0, save_every=1, and eval_every=1")
+    if args.resume and Path(args.resume).resolve().parent != Path(args.output_dir).resolve():
+        raise ValueError("--resume checkpoint must belong to --output-dir")
+    train(args)
 
 
 if __name__ == "__main__":

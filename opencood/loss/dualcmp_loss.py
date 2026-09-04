@@ -126,8 +126,12 @@ class DualCmpLoss(nn.Module):
             if positive.any():
                 rows, slots = torch.nonzero(positive, as_tuple=True); gt_index = assigned[rows, slots]
                 box = box + self.reg(output["track_box"][rows, slots], gt_boxes[rows, gt_index]).mean()
-                gt_velocity = target["current_velocity"][rows, gt_index]
-                velocity = velocity + self.reg(output["track_velocity"][rows, slots], gt_velocity).mean()
+                valid_velocity = target["velocity_mask"][rows, gt_index]
+                if valid_velocity.any():
+                    velocity = velocity + self.reg(
+                        output["track_velocity"][rows[valid_velocity], slots[valid_velocity]],
+                        target["current_velocity"][rows[valid_velocity], gt_index[valid_velocity]],
+                    ).mean()
             # CoLIF ColifLoss::_forecast_loss consumes the existing loss-local
             # current-frame pairs only; future labels never enter the model.
             forecast = output.get("forecast")
