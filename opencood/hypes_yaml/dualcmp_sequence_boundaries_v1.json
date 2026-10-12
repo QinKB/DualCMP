@@ -1,0 +1,16 @@
+{
+  "version": "dualcmp-raw-pose-boundaries-v1",
+  "scope": "source_temporal_aligned only; legacy protocols unchanged",
+  "rule": "Explicit audited raw-file discontinuities, shared across CAVs; no interpolation or numeric-threshold filtering",
+  "scene_id": "testoutput_CAV_data_2022-03-17-10-43-13",
+  "boundaries": ["000188", "000189", "000410"],
+  "evidence": [
+    {"source": "0", "frame": "000188", "sha256": "77b23ae026490201fa49361ece82f39dfaf301a5f9c1972d902e320e6e6afb19"},
+    {"source": "0", "frame": "000189", "sha256": "5ebee7fbd3d22ae0209d10f7f6c7e93115b0921b87246a593bd39c82327d635d"},
+    {"source": "1", "frame": "000187", "sha256": "5c982df3159392d366fabf1dd271195d311ab9d2b1ec4bce4276227638aee629"},
+    {"source": "1", "frame": "000188", "sha256": "5d0bbd84876642bb29951a84e972aa0a93f833ca1413e76890913b232380602a"},
+    {"source": "1", "frame": "000189", "sha256": "aba55c8cef41d6ffab48b9d6eb1c56ca074100f9746e65d7b6d52dcee1147e59"},
+    {"source": "1", "frame": "000409", "sha256": "9165f93235dfc2759451e5598f9eb5d771b1736b1ddf411d89d8491514c7541b"},
+    {"source": "1", "frame": "000410", "sha256": "c520ba205d1cc5bb5d2490dc92cba1ce047094bceca3503553228430b8ab387b"}
+  ]
+}

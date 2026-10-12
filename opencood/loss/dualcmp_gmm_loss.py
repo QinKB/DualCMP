@@ -4,6 +4,22 @@ import torch.nn.functional as F
 
 from opencood.models.dualcmp.mtr_vendor import nll_loss_gmm_direct
 
+PARTIAL_FORECAST_SUPERVISION = "partial_future_v1"
+COMPLETE_FORECAST_SUPERVISION = "cmp_complete_50_v1"
+FORECAST_SUPERVISIONS = (PARTIAL_FORECAST_SUPERVISION, COMPLETE_FORECAST_SUPERVISION)
+
+
+def forecast_supervision_mask(future_mask, contract):
+    if contract not in FORECAST_SUPERVISIONS:
+        raise ValueError("unknown forecast supervision contract")
+    if future_mask.ndim < 2 or future_mask.dtype != torch.bool:
+        raise ValueError("forecast supervision requires a boolean actor/time mask")
+    if contract == COMPLETE_FORECAST_SUPERVISION:
+        if future_mask.shape[-1] != 50:
+            raise ValueError("CMP complete supervision requires fifty 10Hz future frames")
+        return future_mask.all(-1)
+    return future_mask.any(-1)
+
 
 def nearest_mode_gmm_loss(mode_logits, trajectories, target_xy, future_mask,
                           intention_points=None):
@@ -24,6 +40,13 @@ def nearest_mode_gmm_loss(mode_logits, trajectories, target_xy, future_mask,
         gmm, mode = regression.sum(), F.cross_entropy(mode_logits_float[valid_actor], selected_mode[valid_actor], reduction="sum")
     else:
         gmm, mode = trajectories_float.sum() * 0.0, mode_logits_float.sum() * 0.0
+    row = torch.arange(target_xy.shape[0], device=target_xy.device)
+    selected_xy = trajectories_float[row, selected_mode, :, :2]
+    point_reg = F.smooth_l1_loss(
+        selected_xy, target_xy_float, reduction="none").sum(dim=-1)
+    mean_reg = (point_reg * future_mask.to(point_reg.dtype)).sum()
+    mean_reg_count = future_mask.sum().to(trajectories_float.dtype)
     count = valid_actor.sum().to(trajectories_float.dtype)
     return {"gmm": gmm, "mode": mode, "gmm_count": count, "mode_count": count,
+            "mean_reg": mean_reg, "mean_reg_count": mean_reg_count,
             "selected_mode": selected_mode}

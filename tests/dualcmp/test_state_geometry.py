@@ -298,7 +298,8 @@ def test_measurement_score_updates_only_on_match_while_quality_updates_on_miss()
     state = tracker(state, no_proposal, _pose().unsqueeze(0), torch.tensor([0.2]), 1.0)
     updated = DualCmpClipModel.apply_learned_update(
         state, torch.ones_like(state.feature), state.box + 0.1, state.velocity,
-        torch.tensor([[0.8]]), 0.2)
+        torch.tensor([[0.8]]), 0.2, state.receiver_time_s,
+        state.receiver_pose)
     assert updated.score.tolist() == [[pytest.approx(0.9)]]
     assert updated.quality.tolist() == [[pytest.approx(0.8)]]
     assert updated.active_mask.tolist() == [[True]]
@@ -380,7 +381,8 @@ def test_learned_box_updates_filter_without_overwriting_velocity_measurement_sco
     boxes = (state.box + torch.tensor([[[0.2, 0, 0, 0, 0, 0, 0]]])).detach().requires_grad_()
     result = DualCmpClipModel.apply_learned_update(
         state, torch.ones_like(state.feature), boxes, state.velocity + 3.0,
-        torch.tensor([[0.8]]), 0.2)
+        torch.tensor([[0.8]]), 0.2, state.receiver_time_s,
+        state.receiver_pose)
     assert not torch.allclose(result.filter_mean, state.filter_mean)
     assert result.score.tolist() == [[pytest.approx(0.7)]]
     torch.testing.assert_close(result.velocity, state.velocity + 3.0)

@@ -1,7 +1,7 @@
-"""Two-process Phase-A DDP trainer for fixed acceptance or full T=3 data.
+"""Multi-process Phase-A DDP trainer for fixed acceptance or full T=3 data.
 
-Launch only with ``torchrun --nproc_per_node=2``.  ``batch_size`` is clips per
-GPU; the frozen window below has 44 receiver-centric clips (22 per receiver).
+Launch with ``torchrun --nproc_per_node=N``.  ``batch_size`` is clips per GPU;
+the frozen window below has 44 receiver-centric clips (22 per receiver).
 """
 from __future__ import annotations
 
@@ -29,30 +29,38 @@ from opencood.hypes_yaml.yaml_utils import load_yaml
 from opencood.loss.dualcmp_loss import DualCmpLoss
 from opencood.models.dualcmp.model import DualCmpClipModel
 from opencood.tools.train_utils import to_device
-from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRESSION, TOTAL_CLIPS, WINDOW, WINDOW_FRAMES
+from opencood.tools.dualcmp.protocol import CLIPS_PER_RECEIVER, DETECTOR_COMPRESSION, TOTAL_CLIPS, WINDOW, WINDOW_FRAMES, TRAIN_LABEL_WINDOW
+from opencood.tools.dualcmp.detector_config import (
+    DEFAULT_HYPES, detector_provenance, inherited_detector_provenance,
+    load_checkpoint_hypes,
+)
 from opencood.tools.dualcmp.eval_tracking_ddp import (
     evaluate_tracking_model_ddp,
     evaluate_tracking_test_model_ddp,
 )
 
 LOSS_KEYS = ("L_det", "L_exist", "L_box", "L_velocity")
-UNUSED_DETECTOR_PREFIXES = ("graph_sage_net.", "post_graph_cls_head.",
-                            "post_graph_reg_head.")
 OFFICIAL_DETECTOR_ACTIVE_KEYS = 243
-OFFICIAL_DETECTOR_PATH = Path("pretrained/v2v4real/point_pillar_cobevt_multiego_256x/net_epoch75.pth")
-OFFICIAL_DETECTOR_SHA256 = "60e9e84e014889e93ced338e95f3c58b2a1a6a0d47f55f6b5da7bf28ad9c920b"
+OFFICIAL_DETECTOR_SHA256 = "5740a36f8a8613128f29049c789b81e669a815000f4e3a1cc362199e9c84ad6e"
 PHASE_A_SOURCES = (
     "opencood/data_utils/dualcmp_dataloader.py",
     "opencood/data_utils/v2v4real/datasets/dualcmp_sequence_dataset.py",
+    "opencood/data_utils/v2v4real/datasets/dualcmp_target_builder.py",
     "opencood/loss/dualcmp_loss.py",
+    "opencood/loss/point_pillar_loss.py",
     "opencood/models/dualcmp/model.py",
+    "opencood/models/dualcmp/box_refinement.py",
+    "opencood/models/dualcmp/kalman.py",
     "opencood/models/dualcmp/state.py",
     "opencood/models/dualcmp/tracker.py",
+    "opencood/models/point_pillar_fax.py",
     "opencood/tools/dualcmp/ab3dmot_metrics.py",
     "opencood/tools/dualcmp/eval_tracking_ddp.py",
     "opencood/tools/dualcmp/online.py",
+    "opencood/tools/dualcmp/detector_config.py",
     "opencood/tools/dualcmp/protocol.py",
     "opencood/tools/dualcmp/train_tracking_ddp.py",
+    "opencood/hypes_yaml/point_pillar_v2v4real.yaml",
 )
 CSV_FIELDS = ("kind", "split", "epoch", "global_step", "global_samples", "lr_trunk", "lr_heads",
               "L_det", "L_exist", "L_box", "L_velocity", "L_total",
@@ -94,7 +102,7 @@ def _required_code_sha(value=None):
 
 def _run_provenance(args, world_size, gpu_names):
     """Record the explicit checkpoint source, never a dirty working-tree HEAD."""
-    return {"source_sha": _required_code_sha(), "protocol_sha256": _protocol_sha256(),
+    return {"source_sha": _required_code_sha(), "protocol_sha256": _protocol_sha256(), "stage": "tracking",
             "argv": list(sys.argv), "world_size": int(world_size),
             "gpu_names": list(gpu_names), "seed": int(args.seed),
             "epochs": int(args.epochs), "lr": float(args.lr), "amp": bool(args.amp),
@@ -106,23 +114,29 @@ def _run_provenance(args, world_size, gpu_names):
 
 def _dirty_provenance(args, world_size, gpu_names):
     root = Path(__file__).resolve().parents[3]
-    digest = hashlib.sha256()
-    for relative in sorted(PHASE_A_SOURCES):
-        digest.update(relative.encode("utf-8") + b"\0")
-        digest.update((root / relative).read_bytes())
+    digest = _source_tree_sha256()
     return {"source_state": "dirty-smoke",
             "base_sha": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=str(root)
             ).decode().strip(),
-            "source_tree_sha256": digest.hexdigest(),
+            "source_tree_sha256": digest,
             "protocol_sha256": _protocol_sha256(), "argv": list(sys.argv),
-            "world_size": world_size, "gpu_names": gpu_names,
+            "world_size": world_size, "gpu_names": gpu_names, "stage": "tracking",
             "seed": int(args.seed)}
 
 
+def _source_tree_sha256():
+    root = Path(__file__).resolve().parents[3]
+    digest = hashlib.sha256()
+    for relative in sorted(PHASE_A_SOURCES):
+        digest.update(relative.encode("utf-8") + b"\0")
+        digest.update((root / relative).read_bytes())
+    return digest.hexdigest()
+
+
 def _init_distributed():
-    if int(os.environ.get("WORLD_SIZE", "1")) != 2:
-        raise RuntimeError("DualCMP tracking training requires torchrun --nproc_per_node=2")
+    if "LOCAL_RANK" not in os.environ:
+        raise RuntimeError("DualCMP tracking training requires torchrun")
     dist.init_process_group(backend="nccl")
     rank, local_rank = dist.get_rank(), int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
@@ -134,23 +148,41 @@ def _hypes(path, args=None):
     phase_a_weights = os.environ.get("DUALCMP_PHASE_A_INIT_WEIGHTS")
     detector_weights = os.environ.get("DUALCMP_DETECTOR_WEIGHTS")
     label_root = os.environ.get("DUALCMP_TRACKING_LABEL_ROOT")
+    train_label_root = os.environ.get("DUALCMP_TRAIN_TRACKING_LABEL_ROOT")
     full_data = bool(args is not None and args.full_data)
-    allow_full_model_init = bool(args is not None and args.allow_full_model_init)
-    if phase_a_weights and full_data and not allow_full_model_init:
-        raise RuntimeError("formal full-data Phase A rejects DUALCMP_PHASE_A_INIT_WEIGHTS")
-    if not root or not label_root or not (detector_weights or (phase_a_weights and allow_full_model_init)):
+    resume = getattr(args, "resume", None)
+    detector_compression = int(getattr(args, "detector_compression", 32))
+    if phase_a_weights:
+        raise RuntimeError("Phase A rejects DUALCMP_PHASE_A_INIT_WEIGHTS; use official detector weights or same-run --resume")
+    if not root or not label_root or not detector_weights:
         raise EnvironmentError("V2V4REAL_ROOT, DUALCMP_TRACKING_LABEL_ROOT, and DUALCMP_DETECTOR_WEIGHTS are required")
-    if phase_a_weights and detector_weights:
-        raise EnvironmentError("set only one Phase-A initialization checkpoint")
-    if detector_weights and Path(detector_weights).resolve() != OFFICIAL_DETECTOR_PATH.resolve():
-        raise RuntimeError("Phase A accepts only the frozen official CMP detector checkpoint")
-    if int(getattr(args, "detector_compression", 256)) != 256:
-        raise RuntimeError("formal Phase A requires detector compression 256")
-    split = args.data_split if full_data else "test"
-    hypes = load_yaml(path)
+    if resume:
+        if not detector_weights or phase_a_weights:
+            raise EnvironmentError("Phase A resume requires DUALCMP_DETECTOR_WEIGHTS")
+        if _sha256_file(detector_weights) != OFFICIAL_DETECTOR_SHA256:
+            raise RuntimeError("official V2V4Real detector checkpoint SHA256 mismatch")
+        resume_payload = torch.load(resume, map_location="cpu")
+        inherited = inherited_detector_provenance(resume_payload)
+        if not inherited:
+            raise RuntimeError("Phase A cannot resume a legacy CMP detector checkpoint")
+        if resume_payload["provenance"].get("detector_checkpoint_sha256") != _sha256_file(detector_weights):
+            raise RuntimeError("Phase A resume detector checkpoint SHA256 mismatch")
+    if not resume and detector_compression != 32:
+        raise RuntimeError("new Phase A detector initialization requires compression 32")
+    smoke = bool(getattr(args, "train_label_smoke", False))
+    split = "train" if smoke else (args.data_split if full_data else "test")
+    if (full_data or smoke) and split == "train" and not train_label_root:
+        raise EnvironmentError("formal train split requires DUALCMP_TRAIN_TRACKING_LABEL_ROOT")
+    if resume:
+        hypes, _ = load_checkpoint_hypes(path, resume_payload)
+    else:
+        hypes = load_yaml(path)
     hypes["root_dir"] = str(Path(root) / split)
     hypes["validate_dir"] = hypes["root_dir"]
-    hypes["model"]["args"]["compression"] = int(getattr(args, "detector_compression", 256))
+    if not resume:
+        hypes["model"]["args"]["compression"] = detector_compression
+    if int(hypes["model"]["args"]["compression"]) != 32:
+        raise RuntimeError("Phase A detector configuration requires compression 32")
     hypes["fusion"] = {"core_method": "DualCMPSequenceDataset", "args": {
         "stage": "tracking", "tracking_frames": 3, "runtime_only": False,
         "runtime_forbid_gt": True, "receiver_ids": [0, 1], "frame_period_s": 0.1,
@@ -158,32 +190,35 @@ def _hypes(path, args=None):
         "shuffle_training_points": full_data,
         "sequence_augmentation": full_data,
     }}
-    if full_data:
+    if full_data or smoke:
         hypes["fusion"]["args"]["split_name"] = split
-        if split == "test" and label_root:
+        if split == "train":
+            hypes["fusion"]["args"].update({"tracking_label_root": train_label_root,
+                                                "tracking_label_layout": "dmstrack_train"})
+            if smoke:
+                hypes["fusion"]["args"]["window"] = list(TRAIN_LABEL_WINDOW)
+        elif split == "test" and label_root:
             hypes["fusion"]["args"]["tracking_label_root"] = label_root
     else:
         hypes["fusion"]["args"].update({
             "window": list(WINDOW), "tracking_label_root": label_root,
         })
-    return hypes, Path(phase_a_weights or detector_weights), bool(phase_a_weights)
+    return hypes, Path(detector_weights)
 
 
 def _load_official_detector(detector, checkpoint):
     if _sha256_file(checkpoint) != OFFICIAL_DETECTOR_SHA256:
-        raise RuntimeError("official CMP detector checkpoint SHA256 mismatch")
+        raise RuntimeError("official V2V4Real detector checkpoint SHA256 mismatch")
     payload = torch.load(str(checkpoint), map_location="cpu")
     state = payload.get("model", payload.get("model_state_dict", payload))
     if not isinstance(state, dict):
         raise RuntimeError("official detector checkpoint must contain a state dictionary")
     state = {(key[7:] if key.startswith("module.") else key): value
              for key, value in state.items()}
-    ignored = sorted(key for key in state if key.startswith(UNUSED_DETECTOR_PREFIXES))
-    active = {key: value for key, value in state.items() if key not in ignored}
-    if len(ignored) != 16 or len(active) != OFFICIAL_DETECTOR_ACTIVE_KEYS:
-        raise RuntimeError("official detector must contain exactly 243 active and 16 unused forward keys")
-    detector.load_state_dict(active, strict=True)
-    return ignored
+    if len(state) != OFFICIAL_DETECTOR_ACTIVE_KEYS:
+        raise RuntimeError("official detector must contain exactly 243 state-dict keys")
+    detector.load_state_dict(state, strict=True)
+    return len(state)
 
 
 def _optimizer(model, initial_lr, max_lr, weight_decay):
@@ -221,6 +256,15 @@ def _assert_sync(model):
     dist.all_gather(gathered, values)
     if not all(torch.allclose(values, other) for other in gathered):
         raise RuntimeError("DDP parameters diverged across ranks")
+
+
+def _sync_buffers(model):
+    if not dist.is_initialized():
+        raise RuntimeError("buffer synchronization requires initialized DDP")
+    module = model.module if hasattr(model, "module") else model
+    with torch.no_grad():
+        for buffer in module.buffers():
+            dist.broadcast(buffer, src=0)
 
 
 def _global_loss(loss, batch_size, device):
@@ -264,12 +308,17 @@ def train(args):
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     rank, local_rank, world_size = _init_distributed()
+    contract = "dmstrack_train" if (args.full_data and args.data_split == "train") or args.train_label_smoke else "legacy"
+    if args.resume:
+        resumed = torch.load(args.resume, map_location="cpu")
+        if resumed.get("provenance", {}).get("tracking_label_contract") != contract:
+            raise RuntimeError("resume tracking label contract disagrees with requested training split")
     device = torch.device("cuda", local_rank)
     gpu_names = [None for _ in range(world_size)]
     dist.all_gather_object(gpu_names, torch.cuda.get_device_name(local_rank))
     provenance = (_dirty_provenance(args, world_size, gpu_names)
                   if args.dirty_smoke else _run_provenance(args, world_size, gpu_names))
-    hypes, init_weights, full_model_init = _hypes(args.hypes, args)
+    hypes, init_weights = _hypes(args.hypes, args)
     dataset = DualCMPSequenceDataset(hypes, train=True)
     per_receiver = {entry["receiver_id"]: 0 for entry in WINDOW}
     for record in dataset.clip_records:
@@ -288,19 +337,9 @@ def train(args):
         proposal_nms_thresh=hypes["postprocess"]["nms_thresh"],
         emission_threshold=hypes["postprocess"]["target_args"]["score_threshold"],
     ).to(device)
-    ignored_unused_keys = []
-    if not args.resume and full_model_init:
-        init_payload = torch.load(str(init_weights), map_location="cpu")
-        init_state = init_payload.get(
-            "model", init_payload.get("model_state_dict", init_payload)
-        )
-        init_state = {
-            (key[7:] if key.startswith("module.") else key): value
-            for key, value in init_state.items()
-        }
-        model.load_state_dict(init_state, strict=True)
-    elif not args.resume:
-        ignored_unused_keys = _load_official_detector(model.detector, init_weights)
+    loaded_detector_keys = 0
+    if not args.resume:
+        loaded_detector_keys = _load_official_detector(model.detector, init_weights)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank,
                 broadcast_buffers=False)
     criterion = DualCmpLoss({"detector": hypes["loss"]["args"]}).to(device)
@@ -336,7 +375,9 @@ def train(args):
                        else ("base_sha", "source_tree_sha256"))
         required = source_keys + ("detector_checkpoint_sha256", "detector_compression",
                                   "active_loaded_keys", "ignored_unused_keys",
-                                  "tracker_initialization")
+                                  "tracker_initialization", "detector_source",
+                                  "detector_source_revision", "detector_config",
+                                  "detector_configuration_sha256")
         if not isinstance(previous, dict) or any(key not in previous for key in required):
             raise RuntimeError("resume checkpoint is missing formal detector initialization provenance")
         if any(previous[key] != provenance[key] for key in source_keys):
@@ -347,14 +388,15 @@ def train(args):
         provenance.update({"dataset_samples": len(dataset), "steps_per_epoch": len(loader),
                            "per_rank_batch": args.batch_size, "global_batch": args.batch_size * world_size,
                            "workers_per_rank": args.workers, "initial_lr": args.lr, "max_lr": args.max_lr,
-                           "init_kind": "resume" if args.resume else (
-                               "phase-a-model" if full_model_init else "official-detector")})
+                           "init_kind": "resume" if args.resume else "official-detector",
+                           "tracking_label_contract": contract})
         if not args.resume:
             provenance.update({"detector_compression": int(args.detector_compression),
                                "detector_checkpoint_sha256": _sha256_file(init_weights),
-                               "active_loaded_keys": OFFICIAL_DETECTOR_ACTIVE_KEYS,
-                               "ignored_unused_keys": ignored_unused_keys,
+                               "active_loaded_keys": loaded_detector_keys,
+                               "ignored_unused_keys": [],
                                "tracker_initialization": "random"})
+            provenance.update(detector_provenance(hypes))
         if args.resume:
             provenance["resume_checkpoint_sha256"] = _sha256_file(args.resume)
         (output / "config.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
@@ -408,6 +450,7 @@ def train(args):
         epoch_row.update({"kind": "epoch", "split": "train+test", "epoch": epoch + 1, "global_step": step,
                           "global_samples": global_samples, "lr_trunk": optimizer.param_groups[0]["lr"],
                           "lr_heads": optimizer.param_groups[1]["lr"]})
+        _sync_buffers(model)
         checkpoint_payload = {"model": model.module.state_dict(), "optimizer": optimizer.state_dict(),
                               "scheduler": scheduler.state_dict(), "epoch": epoch + 1, "step": step,
                               "global_samples": global_samples, "provenance": provenance}
@@ -442,8 +485,7 @@ def train(args):
                        "initial_lr": args.lr, "max_lr": args.max_lr,
                        "weight_decay": args.weight_decay,
                        "sequence_augmentation": args.full_data,
-                       "init_kind": "resume" if args.resume else (
-                           "phase-a-model" if full_model_init else "official-detector")})
+                       "init_kind": "resume" if args.resume else "official-detector"})
     report = {"steps": step,
               "loss": dict(zip(LOSS_KEYS + ("L_total",), last or [])),
               "provenance": provenance, "peak_memory_mib": peak_memory,
@@ -466,7 +508,7 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(description="two-process DualCMP T=3 DDP trainer")
-    parser.add_argument("--hypes", default="opencood/hypes_yaml/point_pillar_cobevt_multiego_1x_v2v4real.yaml")
+    parser.add_argument("--hypes", default=DEFAULT_HYPES)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=0)
@@ -475,12 +517,12 @@ def main():
                         help="JDT3D-aligned initial tracking-head LR")
     parser.add_argument("--max-lr", type=float, default=5e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--detector-compression", type=int, default=256)
-    parser.add_argument("--allow-full-model-init", action="store_true")
+    parser.add_argument("--detector-compression", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=4,
                         help="independent T=3 clips per GPU")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--full-data", action="store_true")
+    parser.add_argument("--train-label-smoke", action="store_true")
     parser.add_argument("--data-split", choices=("train", "val", "test"), default="train")
     parser.add_argument("--save-every", type=int, default=1)
     parser.add_argument("--eval-every", type=int, default=1)
@@ -490,6 +532,8 @@ def main():
     parser.add_argument("--dirty-smoke", action="store_true")
     parser.add_argument("--amp", action="store_true")
     args = parser.parse_args()
+    if args.train_label_smoke and args.full_data:
+        raise ValueError("--train-label-smoke cannot be combined with --full-data")
     if args.log_every < 1 or args.save_every != 1 or args.eval_every != 1:
         raise ValueError("Phase A requires log_every>0, save_every=1, and eval_every=1")
     if args.resume and Path(args.resume).resolve().parent != Path(args.output_dir).resolve():

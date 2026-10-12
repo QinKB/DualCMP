@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Tuple
@@ -39,13 +41,15 @@ class SceneSequenceIndex:
         self.root_dir = Path(expanded).expanduser().resolve()
         self.frame_period_s = float(frame_period_s)
         self.timeline_tolerance_s = float(timeline_tolerance_s)
-        if self.frame_period_s <= 0 or self.timeline_tolerance_s < 0:
-            raise ValueError("frame_period_s must be positive and timeline_tolerance_s non-negative")
+        if (not math.isfinite(self.frame_period_s) or self.frame_period_s <= 0
+                or not math.isfinite(self.timeline_tolerance_s) or self.timeline_tolerance_s < 0):
+            raise ValueError("frame_period_s must be finite and positive and timeline_tolerance_s finite and non-negative")
         if not self.root_dir.is_dir():
             raise FileNotFoundError("V2V4Real root does not exist: %s" % self.root_dir)
         self._records: Dict[str, Dict[str, Dict[str, SourceFrameRecord]]] = {}
         self._frame_keys: Dict[str, Dict[str, Tuple[str, ...]]] = {}
         self._incomplete_files: List[Tuple[str, str, str, str]] = []
+        self._sequence_boundaries = {}
         self._build(self._load_allowed_scenes(split_manifest, split_name))
         if not self._records:
             raise ValueError("No complete V2V4Real scenes found under %s" % self.root_dir)
@@ -149,6 +153,17 @@ class SceneSequenceIndex:
     def source_ids(self, scene_id: str) -> Tuple[str, ...]: return tuple(self._records[scene_id])
     def receiver_frame_keys(self, scene_id: str, receiver_id: str) -> Tuple[str, ...]: return self._frame_keys[scene_id][str(receiver_id)]
     def source_record(self, scene_id: str, source_id: str, frame_key: str) -> Optional[SourceFrameRecord]: return self._records[scene_id][str(source_id)].get(str(frame_key))
+
+    def set_sequence_boundaries(self, boundaries):
+        """Opt-in acquisition segments; legacy indices have no boundaries."""
+        self._sequence_boundaries = {scene: tuple(sorted(set(frames)))
+                                     for scene, frames in boundaries.items()}
+
+    def segment(self, scene_id, frame_index):
+        return bisect_right(self._sequence_boundaries.get(scene_id, ()), frame_index)
+
+    def is_segment_start(self, scene_id, frame_index):
+        return frame_index in self._sequence_boundaries.get(scene_id, ())
     def receiver_record(self, scene_id: str, receiver_id: str, frame_key: str) -> SourceFrameRecord:
         record = self.source_record(scene_id, receiver_id, frame_key)
         if record is None: raise KeyError((scene_id, receiver_id, frame_key))
@@ -156,10 +171,13 @@ class SceneSequenceIndex:
 
     def latest_arrived_source_record(self, scene_id: str, receiver_id: str, source_id: str,
                                      receiver_frame_key: str, delay_s: float) -> Optional[SourceFrameRecord]:
-        if delay_s < 0: raise ValueError("delay_s must be non-negative")
+        if not math.isfinite(delay_s) or delay_s < 0:
+            raise ValueError("delay_s must be finite and non-negative")
         receiver = self.receiver_record(scene_id, receiver_id, receiver_frame_key)
         candidates = (self._records[scene_id][str(source_id)][key] for key in self._frame_keys[scene_id][str(source_id)])
-        arrived = [record for record in candidates if record.capture_time_s + delay_s <= receiver.capture_time_s + 1e-9]
+        arrived = [record for record in candidates
+                   if record.capture_time_s + delay_s <= receiver.capture_time_s + 1e-9
+                   and self.segment(scene_id, record.frame_index) == self.segment(scene_id, receiver.frame_index)]
         return max(arrived, key=lambda record: record.capture_time_s) if arrived else None
 
     @property

@@ -98,6 +98,13 @@ class CausalTargetBuilder:
                                     receiver_pose: Optional[np.ndarray] = None) -> dict:
         """Return stable label track IDs in CAV0 reference or receiver coordinates."""
         path = Path(label_root) / (str(scene_id) + "-" + str(receiver_id) + ".txt")
+        return self.actors_from_tracking_label_file(
+            path, frame_index, reference_pose, receiver_pose)
+
+    def actors_from_tracking_label_file(self, path: Path, frame_index: int,
+                                        reference_pose: Optional[np.ndarray] = None,
+                                        receiver_pose: Optional[np.ndarray] = None) -> dict:
+        """Read one evaluator-native CAV0 label file at its local frame ordinal."""
         if not path.is_file():
             raise FileNotFoundError("tracking label missing: %s" % path)
         labels = load_tracking_label_file(str(path))

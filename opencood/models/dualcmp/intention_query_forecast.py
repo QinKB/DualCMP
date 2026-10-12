@@ -3,27 +3,53 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from easydict import EasyDict
 
 from opencood.models.dualcmp.mtr_actor_adapter import pack_mtr_actor_polylines
-from opencood.models.dualcmp.mtr_vendor import MTREncoder, MTRDecoder, batch_nms
+from opencood.models.dualcmp.forecast_frames import ALIGNED_SOURCE
+from opencood.models.dualcmp.forecast_normalization import configure_forecast_normalization
+from opencood.models.dualcmp.source_motion_encoder import SourceActorReadout
+from opencood.models.dualcmp.mtr_vendor import (
+    MTREncoder, MTRDecoder, batch_nms, position_encoding_utils,
+)
+
+GMM_VARIANCES = ("log_std_clamp_v1", "softplus_std_v1")
+
+
+def parameterize_gmm_variance(trajectory, contract):
+    """Keep the public [xy,log_std_xy,rho] interface and old graph unchanged.
+
+    Standard positive-scale parameterization prevents exponential cold-start
+    overshoot; native MTR's likelihood and its scale limits remain unchanged.
+    """
+    if contract == "log_std_clamp_v1":
+        return trajectory
+    if contract != "softplus_std_v1" or trajectory.shape[-1] != 5:
+        raise ValueError("unsupported bivariate GMM variance parameterization")
+    log_std = (F.softplus(trajectory[..., 2:4]) + math.exp(-1.609)).log()
+    return torch.cat((trajectory[..., :2], log_std, trajectory[..., 4:]), dim=-1)
 
 
 class IntentionQueryForecastHead(nn.Module):
     """Run the released V2V4Real MTR actor encoder and motion decoder.
 
-    DualCMP changes one explicit boundary: after each standard MTR object-query
-    update, the same intention query may read actor-aligned fused and per-CAV
-    BEV tokens through an additional MTR ``TransformerDecoderLayer``.  With no
-    evidence, the hook is absent and the released MTR path is unchanged.
+    Intention queries read actor-aligned BEV memory after standard MTR updates.
+    The motion-correlation family also supplies target/neighbor history with
+    same-observer motion evidence before scene interaction. With no evidence,
+    both hooks are absent and the released MTR path is unchanged.
     """
 
     def __init__(self, query_dim: int, args: dict):
         super().__init__()
         self.query_dim = int(query_dim)
+        self.evidence_dim = self.query_dim * (2 if args.get("source_feature_encoder") == "motion_correlation_v1" else 1)
+        self.forecast_coordinate_frame = ("current_receiver" if args.get("representation")
+                                          == ALIGNED_SOURCE else "legacy_capture")
         self.history_frames = int(args.get("history_frames", 11))
         self.future_frames = int(args.get("future_frames", 50))
         self.frame_period_s = float(args.get("frame_period_s", 0.1))
@@ -48,7 +74,7 @@ class IntentionQueryForecastHead(nn.Module):
 
         context_config = EasyDict(
             NUM_OF_ATTN_NEIGHBORS=int(args.get("context_neighbors", 16)),
-            NUM_INPUT_ATTR_AGENT=22,
+            NUM_INPUT_ATTR_AGENT=26 if self.forecast_coordinate_frame == "current_receiver" else 22,
             NUM_CHANNEL_IN_MLP_AGENT=int(
                 args.get("context_encoder_hidden", self.query_dim)
             ),
@@ -85,6 +111,8 @@ class IntentionQueryForecastHead(nn.Module):
             DROPOUT_OF_ATTN=float(args.get("dropout", 0.1)),
             LOSS_WEIGHTS=EasyDict(cls=1.0, reg=1.0, vel=0.5),
             NMS_DIST_THRESH=float(args.get("nms_distance", 2.5)),
+            PHYSICAL_DENSE_MOTION=self.forecast_coordinate_frame == "current_receiver",
+            FRAME_PERIOD_S=self.frame_period_s,
         )
         self.decoder = MTRDecoder(
             in_channels=self.context_encoder.num_out_channels,
@@ -103,18 +131,35 @@ class IntentionQueryForecastHead(nn.Module):
             self.evidence_input_projection,
             self.evidence_decoder_layers,
         ) = self.decoder.build_transformer_decoder(
-            in_channels=self.query_dim,
+            in_channels=self.evidence_dim,
             d_model=self.decoder_dim,
             nhead=int(args.get("attention_heads", 8)),
             dropout=float(args.get("dropout", 0.1)),
             num_decoder_layers=self.decoder_layers,
             use_local_attn=False,
         )
+        if self.forecast_coordinate_frame == "current_receiver":
+            # DAB-DETR/MTR's existing option keeps the static intention identity
+            # in every cross-attention layer. Without a map branch, globally
+            # read object/BEV memories can collapse dynamic endpoint queries;
+            # self-attention positional Q/K alone cannot restore identical V.
+            for layer in list(self.decoder.obj_decoder_layers) + list(self.evidence_decoder_layers):
+                layer.keep_query_pos = True
         for layer in self.evidence_decoder_layers:
             layer.capture_attention = True
+            def capture_attention(module, inputs, outputs, owner=layer):
+                owner.last_cross_attention_weights = outputs[1].detach() if outputs[1] is not None else None
+            layer.cross_attn.register_forward_hook(capture_attention)
 
         self.enabled = bool(args.get("enabled", True))
         self.source_evidence_enabled = bool(args.get("source_evidence", True))
+        self.temporal_source_enabled = (
+            str(args.get("representation", "source")) == "source_temporal")
+        self.temporal_source_fusion_gates = None
+        if self.temporal_source_enabled:
+            self.temporal_source_fusion_gates = nn.Parameter(
+                torch.full((self.decoder_layers,), 0.1)
+            )
         self._unused_map_modules = [
             self.context_encoder.map_encoders,
             self.decoder.in_proj_map,
@@ -128,9 +173,24 @@ class IntentionQueryForecastHead(nn.Module):
                 ]
             )
         self._unused_query_position_modules = [
-            *(layer.ca_qpos_proj for layer in self.decoder.obj_decoder_layers[1:]),
-            *(layer.ca_qpos_proj for layer in self.evidence_decoder_layers[1:]),
+            *(layer.ca_qpos_proj for layer in self.decoder.obj_decoder_layers[1:] if not layer.keep_query_pos),
+            *(layer.ca_qpos_proj for layer in self.evidence_decoder_layers[1:] if not layer.keep_query_pos),
         ]
+        self.freeze_unused_parameters()
+
+        self.source_actor_readout = None
+        if self.evidence_dim == 2 * self.query_dim and self.forecast_coordinate_frame == "current_receiver":
+            self.source_actor_readout = SourceActorReadout(
+                self.query_dim, self.evidence_dim,
+                int(args.get("context_encoder_heads", 8)), float(args.get("dropout", 0.1)))
+        self.forecast_normalization = str(args.get("forecast_normalization", "batch_norm_v1"))
+        self.forecast_variance = str(args.get("forecast_variance", "log_std_clamp_v1"))
+        if self.forecast_variance not in GMM_VARIANCES or (self.forecast_coordinate_frame != "current_receiver" and self.forecast_variance != "log_std_clamp_v1"):
+            raise ValueError("new variance parameterization is aligned-only; legacy ablations stay unchanged")
+        if self.forecast_coordinate_frame != "current_receiver" and self.forecast_normalization != "batch_norm_v1":
+            raise ValueError("new normalization is aligned-only; legacy ablations stay unchanged")
+        configure_forecast_normalization(self, self.forecast_normalization)
+        # Replacing inactive norm parameters must not unfreeze unused branches.
         self.freeze_unused_parameters()
 
     def freeze_unused_parameters(self) -> None:
@@ -151,19 +211,25 @@ class IntentionQueryForecastHead(nn.Module):
             for module in (
                 self.evidence_input_projection,
                 self.evidence_decoder_layers,
+                *([self.source_actor_readout] if self.source_actor_readout is not None else []),
             ):
                 for parameter in module.parameters():
                     parameter.requires_grad = False
 
     @staticmethod
-    def _right_align_history(history_box, history_mask, history_frames):
+    def _right_align_history(history_box, history_mask, history_time_s,
+                             history_frames):
         if history_box.shape[:-1] != history_mask.shape or history_box.shape[-1] != 7:
             raise ValueError("history_box/history_mask shapes disagree")
+        if history_time_s.shape != history_mask.shape:
+            raise ValueError("history_time_s must match history_mask")
         length = history_box.shape[-2]
         if length > history_frames:
-            return history_box[..., -history_frames:, :], history_mask[..., -history_frames:]
+            return (history_box[..., -history_frames:, :],
+                    history_mask[..., -history_frames:],
+                    history_time_s[..., -history_frames:])
         if length == history_frames:
-            return history_box, history_mask
+            return history_box, history_mask, history_time_s
         pad = history_frames - length
         return (
             torch.cat(
@@ -180,10 +246,16 @@ class IntentionQueryForecastHead(nn.Module):
                 ),
                 dim=-1,
             ),
+            torch.cat(
+                (history_time_s.new_zeros(*history_time_s.shape[:-1], pad),
+                 history_time_s),
+                dim=-1,
+            ),
         )
 
     def _pack_evidence_memory(
-        self, entries, tokens, positions, token_mask, name
+        self, entries, tokens, positions, token_mask, age_s, name,
+        aggregate_sources=False,
     ):
         if tokens is None:
             return None
@@ -191,12 +263,43 @@ class IntentionQueryForecastHead(nn.Module):
             tokens = tokens.unsqueeze(2)
             positions = positions.unsqueeze(2) if positions is not None else None
             token_mask = token_mask.unsqueeze(2) if token_mask is not None else None
-        if tokens.ndim != 5 or tokens.shape[-1] != self.query_dim:
+            age_s = age_s.unsqueeze(2) if age_s is not None else None
+        if tokens.ndim != 5 or tokens.shape[-1] != self.evidence_dim:
             raise ValueError(f"{name}_tokens must have shape [B,Q,L,P,D]")
         if positions is None or positions.shape != (*tokens.shape[:-1], 3):
             raise ValueError(f"{name}_positions must have shape [B,Q,L,P,3]")
         if token_mask is None or token_mask.shape != tokens.shape[:-1]:
             raise ValueError(f"{name}_token_mask must have shape [B,Q,L,P]")
+        if age_s is not None:
+            if age_s.shape != tokens.shape[:3]:
+                raise ValueError(f"{name}_age_s must have shape [B,Q,L]")
+            valid_age = token_mask.any(dim=-1)
+            if not torch.isfinite(age_s[valid_age]).all() or torch.any(
+                age_s[valid_age] < -1e-6
+            ):
+                raise ValueError(f"{name}_age_s must be finite and non-negative")
+            safe_age = torch.where(valid_age, age_s, torch.zeros_like(age_s))
+            age_steps = safe_age / self.frame_period_s
+            age_position = torch.stack(
+                (age_steps.reshape(-1), torch.zeros_like(age_steps).reshape(-1)),
+                dim=-1,
+            ).unsqueeze(1)
+            zero_position = torch.zeros_like(age_position)
+            age_encoding = (
+                position_encoding_utils.gen_sineembed_for_position(
+                    age_position, hidden_dim=self.evidence_dim)
+                - position_encoding_utils.gen_sineembed_for_position(
+                    zero_position, hidden_dim=self.evidence_dim)
+            ).squeeze(1).reshape(*safe_age.shape, self.evidence_dim)
+            tokens = tokens + age_encoding[:, :, :, None, :]
+        if aggregate_sources:
+            weights = token_mask[..., None].to(dtype=tokens.dtype)
+            denominator = weights.sum(dim=2, keepdim=True).clamp_min(1.0)
+            tokens = (tokens * weights).sum(dim=2, keepdim=True) / denominator
+            positions = (
+                positions * weights.to(dtype=positions.dtype)
+            ).sum(dim=2, keepdim=True) / denominator.to(dtype=positions.dtype)
+            token_mask = token_mask.any(dim=2, keepdim=True)
         count = len(entries)
         _, _, sources, patches, dim = tokens.shape
         token_count = sources * patches
@@ -226,7 +329,17 @@ class IntentionQueryForecastHead(nn.Module):
             torch.cat([item[2] for item in bundles], dim=1),
         )
 
-    def _evidence_hook(self, memory_bundle, attention_by_layer):
+    @staticmethod
+    def _fuse_parallel_source(query_content, source_query,
+                              layer_input_query, gate):
+        """Keep the MTR query primary and add only source-caused change."""
+        if not (query_content.shape == source_query.shape
+                == layer_input_query.shape):
+            raise ValueError("parallel source query shapes must match")
+        return query_content + gate * (source_query - layer_input_query)
+
+    def _evidence_hook(self, memory_bundle, attention_by_layer,
+                       parallel_source=False):
         if memory_bundle is None:
             return None
         raw_memory, memory_pos, memory_mask = memory_bundle
@@ -240,12 +353,18 @@ class IntentionQueryForecastHead(nn.Module):
         )
         projected[safe_mask] = self.evidence_input_projection(raw_memory[safe_mask])
 
-        def hook(*, query_content, intention_query, dynamic_query_center, layer_idx):
+        def hook(*, query_content, intention_query, dynamic_query_center,
+                 layer_idx, layer_input_query=None):
+            attention_query = (
+                layer_input_query
+                if parallel_source and layer_input_query is not None
+                else query_content
+            )
             updated = self.decoder.apply_cross_attention(
                 kv_feature=projected,
                 kv_mask=safe_mask,
                 kv_pos=memory_pos,
-                query_content=query_content,
+                query_content=attention_query,
                 query_embed=intention_query,
                 attention_layer=self.evidence_decoder_layers[layer_idx],
                 dynamic_query_center=dynamic_query_center,
@@ -261,6 +380,15 @@ class IntentionQueryForecastHead(nn.Module):
                     has_memory[:, None, None],
                     weights,
                     torch.zeros_like(weights),
+                )
+            if parallel_source:
+                if (layer_input_query is None
+                        or self.temporal_source_fusion_gates is None):
+                    raise RuntimeError(
+                        "temporal source fusion requires parallel MTR features")
+                updated = self._fuse_parallel_source(
+                    query_content, updated, layer_input_query,
+                    self.temporal_source_fusion_gates[layer_idx],
                 )
             return torch.where(
                 has_memory[None, :, None], updated, query_content
@@ -371,6 +499,7 @@ class IntentionQueryForecastHead(nn.Module):
             ),
             "forecast_frame_heading": query_feat.new_zeros(batch, queries),
             "forecast_loss_in_receiver_frame": False,
+            "forecast_coordinate_frame": self.forecast_coordinate_frame,
             "packed_entries": (),
             "packed_context_slots": torch.empty(
                 0, 0, dtype=torch.long, device=query_feat.device
@@ -388,6 +517,7 @@ class IntentionQueryForecastHead(nn.Module):
         valid_mask,
         history_box,
         history_mask,
+        history_time_s,
         receiver_time_s,
         consensus_tokens=None,
         consensus_positions=None,
@@ -395,17 +525,20 @@ class IntentionQueryForecastHead(nn.Module):
         source_tokens=None,
         source_positions=None,
         source_token_mask=None,
+        source_age_s=None,
+        mean_source_aggregation=False,
     ):
         with torch.cuda.amp.autocast(enabled=False):
             query_feat = query_feat.float()
             boxes = boxes.float()
             history_box = history_box.float()
+            history_time_s = history_time_s.float()
             receiver_time_s = receiver_time_s.float()
             output = self.empty_outputs(query_feat, valid_mask)
             if not self.enabled:
                 return output
-            history_box, history_mask = self._right_align_history(
-                history_box, history_mask, self.history_frames
+            history_box, history_mask, history_time_s = self._right_align_history(
+                history_box, history_mask, history_time_s, self.history_frames
             )
             output["forecast_history_steps"] = history_mask.sum(dim=-1)
             output["forecast_frame_heading"] = boxes[..., 6]
@@ -414,11 +547,13 @@ class IntentionQueryForecastHead(nn.Module):
                 valid_mask,
                 history_box,
                 history_mask,
+                history_time_s,
                 receiver_time_s,
                 min_forecast_history_steps=self.min_forecast_history_steps,
                 min_context_history_steps=self.min_context_history_steps,
                 frame_period_s=self.frame_period_s,
                 timestamp_scale=self.timestamp_scale,
+                legacy_heading=(self.forecast_coordinate_frame == "legacy_capture"),
             )
             if packed is None:
                 return output
@@ -429,6 +564,7 @@ class IntentionQueryForecastHead(nn.Module):
                 consensus_positions.float()
                 if consensus_positions is not None else None,
                 consensus_token_mask,
+                None,
                 "consensus",
             )
             source = (
@@ -439,22 +575,38 @@ class IntentionQueryForecastHead(nn.Module):
                     if source_positions is not None
                     else None,
                     source_token_mask,
+                    source_age_s.float() if source_age_s is not None else None,
                     "source",
+                    aggregate_sources=bool(mean_source_aggregation),
                 )
                 if self.source_evidence_enabled
                 else None
             )
             combined = self._combine_evidence(consensus, source)
             attention_by_layer = {}
-            query_hook = self._evidence_hook(combined, attention_by_layer)
+            query_hook = self._evidence_hook(
+                combined, attention_by_layer,
+                parallel_source=self.temporal_source_enabled)
+            # No zero edges on normal supervised graphs. The trainer handles
+            # a missing trainable evidence branch after loss-local matching.
+            output["needs_forecast_ddp_anchor"] = (
+                query_hook is None and any(parameter.requires_grad
+                    for parameter in self.evidence_input_projection.parameters()))
 
-            encoded = self.context_encoder(packed.batch_dict)
+            actor_hook = None
+            if self.source_actor_readout is not None and source is not None:
+                actor_hook = lambda features: self.source_actor_readout(
+                    features, packed.entries, packed.context_slots,
+                    source_tokens.float(), source_positions.float(), source_token_mask)
+            encoded = self.context_encoder(packed.batch_dict, actor_feature_hook=actor_hook)
             decoded = self.decoder(
                 encoded,
                 query_feature_hook=query_hook,
                 store_training_targets=False,
             )
             predictions = self.decoder.forward_ret_dict["pred_list"]
+            predictions = [(scores, parameterize_gmm_variance(trajs, self.forecast_variance))
+                           for scores, trajs in predictions]
             layer_scores = torch.stack([item[0] for item in predictions], dim=1)
             layer_trajs = torch.stack([item[1] for item in predictions], dim=1)
             raw_scores, raw_trajs = predictions[-1]
@@ -469,7 +621,7 @@ class IntentionQueryForecastHead(nn.Module):
                 selected_local, packed.decoder_headings
             )
             intentions = self.decoder.forward_ret_dict["intention_points"]
-            dense = self.decoder.forward_ret_dict["pred_dense_trajs"]
+            dense = parameterize_gmm_variance(self.decoder.forward_ret_dict["pred_dense_trajs"], self.forecast_variance)
 
             consensus_sources = consensus[3] if consensus is not None else 0
             consensus_patches = consensus[4] if consensus is not None else 0

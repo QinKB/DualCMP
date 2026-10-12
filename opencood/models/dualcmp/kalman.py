@@ -6,8 +6,6 @@ bundled AB3DMOT license are academic/non-profit noncommercial research only.
 """
 from __future__ import annotations
 
-import math
-
 import torch
 
 
@@ -56,11 +54,11 @@ def orientation_correction(theta_pre, theta_obs):
     theta_pre = torch.atan2(torch.sin(theta_pre), torch.cos(theta_pre))
     theta_obs = torch.atan2(torch.sin(theta_obs), torch.cos(theta_obs))
     difference = torch.abs(theta_obs - theta_pre)
-    if difference > math.pi / 2.0 and difference < math.pi * 3.0 / 2.0:
-        theta_pre = theta_pre + math.pi
-        theta_pre = torch.atan2(torch.sin(theta_pre), torch.cos(theta_pre))
-    if torch.abs(theta_obs - theta_pre) >= math.pi * 3.0 / 2.0:
-        theta_pre = theta_pre + (math.pi * 2.0 if theta_obs > 0 else -math.pi * 2.0)
+    theta_pre = torch.where((difference > torch.pi / 2) & (difference < torch.pi * 3 / 2),
+                            theta_pre + torch.pi, theta_pre)
+    theta_pre = torch.atan2(torch.sin(theta_pre), torch.cos(theta_pre))
+    theta_pre = torch.where(torch.abs(theta_obs - theta_pre) >= torch.pi * 3 / 2,
+                            theta_pre + torch.where(theta_obs > 0, torch.pi * 2, -torch.pi * 2), theta_pre)
     return theta_pre, theta_obs
 
 

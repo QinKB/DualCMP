@@ -1,3 +1,10 @@
+"""V2V4Real PointPillarFax (ucla-mobility/V2V4Real, 5a821e1).
+
+The official computation is retained. DualCMP only omits the unused
+spatial_correction_matrix read and exposes source/mask/fused BEV outputs.
+Upstream academic/noncommercial license applies; see LICENSE.
+"""
+
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat

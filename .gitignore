@@ -19,6 +19,40 @@ preprocessed_data/v2v4real/*_tracking_result_for_prediction_*.pkl
 results/*
 opencood/logs/point_pillar_cobevt_v2v4real_*
 
+# Local training/evaluation outputs; checkpoints remain outside Git history.
+runs/
+logs/
+forecast-smoke*/
+
 # Interpreter-specific native-extension build outputs.
 *.cpython-*.so
 MTR/mtr/version.py
+
+# Code-only publication: keep local papers, docs, data and artifacts out of Git.
+DualCMP_TITS/
+docs/
+.serena/
+dualcmp-abstract*/
+*.md
+*.tex
+*.bib
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.npy
+*.npz
+*.sqlite
+*.sqlite3
+*.so
+*.o
+*.a
+*.egg-info/
+*.csv
+*.jsonl

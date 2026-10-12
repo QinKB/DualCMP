@@ -85,18 +85,32 @@ class ActorTracker(torch.nn.Module):
         forecast_history_mask = state.forecast_history_mask & valid[:, :, None]
         forecast_history_box = torch.where(valid[:, :, None, None], state.forecast_history_box,
                                            torch.zeros_like(state.forecast_history_box))
+        forecast_history_time_s = torch.where(
+            forecast_history_mask, state.forecast_history_time_s,
+            torch.zeros_like(state.forecast_history_time_s))
+        forecast_history_pose = torch.where(
+            forecast_history_mask[:, :, :, None, None], state.forecast_history_pose,
+            torch.zeros_like(state.forecast_history_pose))
         # A deleted slot may be allocated to a new runtime ID in this call.
         # Capture-native forecast history is runtime-owned and cannot cross
         # that identity boundary (CoLIF tracker initializes newborn memory).
         reused = valid & (runtime_id != state.runtime_id)
+        feature = torch.where((valid & ~reused)[:, :, None], state.feature,
+                              torch.zeros_like(state.feature))
         history_mask = history_mask & ~reused[:, :, None]
         forecast_history_mask = forecast_history_mask & ~reused[:, :, None]
         history_box = torch.where(history_mask[:, :, :, None], history_box,
                                   torch.zeros_like(history_box))
         forecast_history_box = torch.where(forecast_history_mask[:, :, :, None], forecast_history_box,
                                            torch.zeros_like(forecast_history_box))
+        forecast_history_time_s = torch.where(
+            forecast_history_mask, forecast_history_time_s,
+            torch.zeros_like(forecast_history_time_s))
+        forecast_history_pose = torch.where(
+            forecast_history_mask[:, :, :, None, None], forecast_history_pose,
+            torch.zeros_like(forecast_history_pose))
         mean = torch.where(valid[:, :, None], mean, torch.zeros_like(mean))
         covariance = torch.where(valid[:, :, None, None], covariance, torch.zeros_like(covariance))
-        result = replace(state, box=box, velocity=velocity, score=score, valid_mask=valid, active_mask=active, miss_count=miss, age=age, runtime_id=runtime_id, next_runtime_id=next_id, last_update_time_s=last_update, history_mask=history_mask, history_box=history_box, forecast_history_mask=forecast_history_mask, forecast_history_box=forecast_history_box, filter_mean=mean, filter_cov=covariance)
+        result = replace(state, feature=feature, box=box, velocity=velocity, score=score, valid_mask=valid, active_mask=active, miss_count=miss, age=age, runtime_id=runtime_id, next_runtime_id=next_id, last_update_time_s=last_update, history_mask=history_mask, history_box=history_box, forecast_history_mask=forecast_history_mask, forecast_history_box=forecast_history_box, forecast_history_time_s=forecast_history_time_s, forecast_history_pose=forecast_history_pose, filter_mean=mean, filter_cov=covariance)
         result.validate()
         return result

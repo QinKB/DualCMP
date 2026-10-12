@@ -120,6 +120,55 @@ def test_stage_contract_and_scene_boundary(v2v4real_root):
     assert isinstance(build_v2v4real_dataset(_params(v2v4real_root)), sequence_module.DualCMPSequenceDataset)
 
 
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), -float("inf")])
+def test_clock_parameters_reject_nonfinite_values(v2v4real_root, invalid):
+    with pytest.raises(ValueError, match="finite"):
+        SceneSequenceIndex(str(v2v4real_root), frame_period_s=invalid)
+    with pytest.raises(ValueError, match="finite"):
+        SceneSequenceIndex(str(v2v4real_root), timeline_tolerance_s=invalid)
+    index = SceneSequenceIndex(str(v2v4real_root))
+    with pytest.raises(ValueError, match="finite"):
+        index.latest_arrived_source_record("scene_a", "0", "1", "0001", invalid)
+
+
+def test_sparse_source_slots_fail_before_fax_regroup(v2v4real_root):
+    dataset = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, max_cav=3))
+    frame = dataset._runtime_frame("scene_a", "0", "0000")
+    frame["source_captures"][1]["source_slot"] = 2
+    with pytest.raises(ValueError, match="contiguous prefix"):
+        dataset._collate_runtime_frame([frame])
+
+
+def test_partial_future_and_velocity_stop_at_acquisition_cut(v2v4real_root, monkeypatch):
+    def boundaries(index):
+        index.set_sequence_boundaries({"scene_a": [3]})
+        return {"sha256": "fixture"}
+    monkeypatch.setattr(sequence_module, "configure_aligned_boundaries", boundaries)
+    dataset = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, "forecast",
+        forecast_history_frames=1, forecast_coordinate_frame="current_receiver",
+        require_full_future=False))
+    before = dataset._target_frame("scene_a", "0", "0002", "0001", True)
+    assert not before["future_mask"].any()
+    after = dataset._target_frame("scene_a", "0", "0003", "0002", True)
+    assert not after["velocity_mask"].any()
+    assert after["future_mask"].any()  # Later observations in this segment remain valid.
+    legacy = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, "forecast"))
+    assert legacy._target_frame("scene_a", "0", "0002", "0001", True)["future_mask"].all(axis=1).any()
+
+
+def test_small_cache_retains_real_samples_and_rejects_randomized_io(v2v4real_root):
+    dataset = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, shuffle_training_points=False))
+    sample = dataset[0]
+    dataset.cache_small_subset()
+    assert dataset[0]["scene_receiver_key"] == sample["scene_receiver_key"]
+    for cached, original in zip(dataset[0]["runtime_frames"], sample["runtime_frames"]):
+        assert cached["receiver_frame_key"] == original["receiver_frame_key"]
+        assert np.array_equal(cached["receiver_pose"], original["receiver_pose"])
+    randomized = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, shuffle_training_points=True))
+    with pytest.raises(ValueError, match="deterministic"):
+        randomized.cache_small_subset()
+
+
 def test_timeline_gap_is_rejected(tmp_path):
     _frame(tmp_path, "scene", "0", "0000", 0, 5)
     _frame(tmp_path, "scene", "0", "0002", 2, 5)
@@ -204,6 +253,7 @@ def test_runtime_target_isolation_collate_and_missing_partner(v2v4real_root):
     assert runtime["source_slot"].tolist() == [0, 0]
     assert runtime["source_mask"].tolist() == [[True, False], [True, False]]
     assert runtime["record_len"].tolist() == [1, 1]
+    assert result["partner_delay_ms"].tolist() == [0.0, 0.0]
     with pytest.raises(ValueError, match="nested.target_frames"):
         assert_runtime_is_supervision_free({"nested": {"target_frames": {"future_xy": []}}})
 
@@ -227,6 +277,34 @@ def test_partner_delay_provenance(tmp_path):
     assert delayed_partner["arrival_time_s"] == pytest.approx(0.1)
     assert delayed_partner["delta_t_s"] == pytest.approx(0.1)
 
+    explicit = sequence_module.DualCMPSequenceDataset(
+        _params(tmp_path, "detection", runtime_only=True,
+                partner_delay_ms=200),
+    )
+    explicit_partner = explicit[2]["runtime_frames"][0]["source_captures"][1]
+    assert explicit_partner["capture_frame_idx"] == 0
+    assert explicit_partner["arrival_time_s"] == pytest.approx(0.2)
+    assert explicit_partner["delta_t_s"] == pytest.approx(0.2)
+
+    mixed_args = dict(
+        runtime_only=True,
+        partner_delay_ms=100,
+        partner_delay_choices_ms=[0, 100, 200],
+        partner_delay_seed=23,
+    )
+    mixed_a = sequence_module.DualCMPSequenceDataset(
+        _params(tmp_path, "detection", **mixed_args))
+    mixed_b = sequence_module.DualCMPSequenceDataset(
+        _params(tmp_path, "detection", **mixed_args))
+    assigned_a = [mixed_a[index]["partner_delay_ms"]
+                  for index in range(len(mixed_a))]
+    assigned_b = [mixed_b[index]["partner_delay_ms"]
+                  for index in range(len(mixed_b))]
+    assert assigned_a == assigned_b
+    assert set(assigned_a) == {0.0, 100.0, 200.0}
+    counts = [entry["clips"] for entry in mixed_a.partner_delay_histogram]
+    assert max(counts) - min(counts) <= 1
+
 
 def test_forecast_only_constructs_future_and_masks_tail(v2v4real_root):
     forecast = sequence_module.DualCMPSequenceDataset(_params(v2v4real_root, "forecast"))
@@ -243,6 +321,17 @@ def test_positive_backward_dt_and_distributed_per_gpu_batch():
     dataset, loader, sampler = build_dataloader(TensorDataset(torch.arange(8)), 2, True,
                                                 workers=0, rank=1, world_size=2, training=True)
     assert sampler is not None and loader.batch_size == 2 and len(dataset) == 8
+
+
+@pytest.mark.parametrize("world_size", [1, 2, 3])
+def test_distributed_loader_uses_runtime_world_size(world_size):
+    dataset = TensorDataset(torch.arange(12))
+    samplers = [build_dataloader(
+        dataset, 2, True, workers=0, rank=rank, world_size=world_size,
+        training=True, pin_memory=False,
+    )[2] for rank in range(world_size)]
+    assert all(sampler.num_replicas == world_size for sampler in samplers)
+    assert len(set().union(*(set(sampler) for sampler in samplers))) == 12
 
 
 def test_training_distributed_odd_dataset_drops_padding_and_tail_batches():

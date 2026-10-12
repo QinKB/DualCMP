@@ -37,6 +37,8 @@ class ActorState:
     history_mask: torch.Tensor
     forecast_history_box: torch.Tensor
     forecast_history_mask: torch.Tensor
+    forecast_history_time_s: torch.Tensor
+    forecast_history_pose: torch.Tensor
     filter_mean: torch.Tensor
     filter_cov: torch.Tensor
     receiver_pose: torch.Tensor
@@ -82,6 +84,8 @@ class ActorState:
             history_mask=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=torch.bool),
             forecast_history_box=torch.zeros(batch_size, max_actors, history_len, 7, device=device, dtype=dtype),
             forecast_history_mask=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=torch.bool),
+            forecast_history_time_s=torch.zeros(batch_size, max_actors, history_len, device=device, dtype=dtype),
+            forecast_history_pose=torch.zeros(batch_size, max_actors, history_len, 4, 4, device=device, dtype=dtype),
             filter_mean=torch.zeros(batch_size, max_actors, 10, device=device, dtype=dtype),
             filter_cov=torch.zeros(batch_size, max_actors, 10, 10, device=device, dtype=dtype),
             receiver_pose=receiver_pose,
@@ -104,6 +108,8 @@ class ActorState:
             "feature": self.feature, "box": self.box, "velocity": self.velocity,
             "score": self.score, "quality": self.quality,
             "history_box": self.history_box, "forecast_history_box": self.forecast_history_box,
+            "forecast_history_time_s": self.forecast_history_time_s,
+            "forecast_history_pose": self.forecast_history_pose,
             "filter_mean": self.filter_mean,
             "filter_cov": self.filter_cov, "receiver_pose": self.receiver_pose,
             "receiver_time_s": self.receiver_time_s,
@@ -134,6 +140,10 @@ class ActorState:
             raise ValueError("forecast_history_box must match history_box [B,A,H,7]")
         if self.forecast_history_mask.shape != self.forecast_history_box.shape[:-1] or self.forecast_history_mask.dtype != torch.bool:
             raise ValueError("forecast_history_mask must match forecast_history_box [B,A,H]")
+        if self.forecast_history_time_s.shape != self.forecast_history_mask.shape:
+            raise ValueError("forecast_history_time_s must match forecast history [B,A,H]")
+        if self.forecast_history_pose.shape != (*self.forecast_history_mask.shape, 4, 4):
+            raise ValueError("forecast_history_pose must have shape [B,A,H,4,4]")
         if torch.any(self.history_mask & ~self.valid_mask[:, :, None]):
             raise ValueError("history_mask can only be set for valid actors")
         if torch.any(self.forecast_history_mask & ~self.valid_mask[:, :, None]):

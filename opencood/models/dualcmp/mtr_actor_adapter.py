@@ -28,24 +28,50 @@ def _last_valid_positions(local_xyz: torch.Tensor, mask: torch.Tensor) -> torch.
     ).squeeze(-2)
 
 
+def causal_motion_features(local_xy, mask, timestamps, frame_period_s):
+    """MTR velocity/acceleration channels from observed, aligned track boxes.
+
+    V2V4Real has no independent per-observation velocity field here. Use only
+    two/three consecutive real past observations and their actual intervals;
+    unknown first/gap derivatives stay zero, never copied from future states.
+    """
+    velocity = torch.zeros_like(local_xy)
+    acceleration = torch.zeros_like(local_xy)
+    dt = timestamps[:, 1:] - timestamps[:, :-1]
+    consecutive = (mask[:, 1:] & mask[:, :-1] & (dt > 0)
+                   & (dt <= float(frame_period_s) + 1e-4))
+    safe_dt = torch.where(consecutive, dt, torch.ones_like(dt))
+    velocity[:, 1:] = torch.where(consecutive[..., None],
+        (local_xy[:, 1:] - local_xy[:, :-1]) / safe_dt[..., None],
+        torch.zeros_like(local_xy[:, 1:]))
+    acceleration_valid = consecutive[:, 1:] & consecutive[:, :-1]
+    acceleration[:, 2:] = torch.where(acceleration_valid[..., None],
+        (velocity[:, 2:] - velocity[:, 1:-1]) / safe_dt[:, 1:, None],
+        torch.zeros_like(local_xy[:, 2:]))
+    return velocity, acceleration
+
+
 def pack_mtr_actor_polylines(
     boxes: torch.Tensor,
     valid_mask: torch.Tensor,
     history_box: torch.Tensor,
     history_mask: torch.Tensor,
+    history_time_s: torch.Tensor,
     receiver_time_s: torch.Tensor,
     *,
     min_forecast_history_steps: int,
     min_context_history_steps: int,
     frame_period_s: float,
     timestamp_scale: float = 0.1,
+    legacy_heading: bool = True,
 ) -> PackedMTRActors | None:
-    """Build the released V2V4Real MTR 22-D actor representation.
+    """Build legacy 22-D or aligned, motion-complete 26-D MTR actors.
 
-    ``history_box`` stores every observation in the receiver-local frame of
-    its own capture, matching the released V2V4Real CMP cache.  It must not be
-    replaced by the tracker's history re-expressed in the current receiver
-    frame.  CoLIF boxes use ``[x,y,z,h,w,l,yaw_rad]``; CMP/MTR consumes
+    With ``legacy_heading=True``, ``history_box`` stores every observation
+    in its capture receiver frame, matching the released CMP cache. With
+    ``legacy_heading=False``, the caller supplies history re-expressed in
+    the prediction-time receiver frame. CoLIF boxes use
+    ``[x,y,z,h,w,l,yaw_rad]``; CMP/MTR consumes
     ``[x,y,z,l,w,h,heading_numeric]`` and its released V2V4Real path applies
     trigonometric functions directly to degree-valued headings.  The legacy
     conversion is deliberately confined to this adapter.
@@ -57,6 +83,8 @@ def pack_mtr_actor_polylines(
         raise ValueError("history_box/history_mask shapes disagree")
     if history_mask.shape[:2] != boxes.shape[:2]:
         raise ValueError("history_mask must have shape [B,Q,T]")
+    if history_time_s.shape != history_mask.shape:
+        raise ValueError("history_time_s must match history_mask [B,Q,T]")
     if valid_mask.shape != boxes.shape[:2]:
         raise ValueError("valid_mask must have shape [B,Q]")
     if receiver_time_s.shape != (boxes.shape[0],):
@@ -86,7 +114,8 @@ def pack_mtr_actor_polylines(
     center_count = len(entries)
     max_context = max(int(slots.numel()) for slots in contexts)
     time_count = history_mask.shape[-1]
-    obj_trajs = history_box.new_zeros(center_count, max_context, time_count, 22)
+    feature_count = 22 if legacy_heading else 26
+    obj_trajs = history_box.new_zeros(center_count, max_context, time_count, feature_count)
     obj_mask = torch.zeros(
         center_count, max_context, time_count,
         dtype=torch.bool, device=history_mask.device,
@@ -100,17 +129,13 @@ def pack_mtr_actor_polylines(
     decoder_headings = boxes.new_zeros(center_count)
 
     time_one_hot = torch.eye(time_count, device=boxes.device, dtype=boxes.dtype)
-    time_offsets = torch.arange(
-        1 - time_count, 1, device=boxes.device, dtype=boxes.dtype
-    ) * float(frame_period_s)
-
     for row, ((batch_index, center_slot), slots) in enumerate(
         zip(entries, contexts)
     ):
         size = int(slots.numel())
         center_box = boxes[batch_index, center_slot]
         center_heading = center_box[6]
-        decoder_heading = torch.rad2deg(center_heading)
+        decoder_heading = torch.rad2deg(center_heading) if legacy_heading else center_heading
         histories = history_box[batch_index, slots]
         mask = history_mask[batch_index, slots].bool()
 
@@ -120,9 +145,10 @@ def pack_mtr_actor_polylines(
         local_x = cosine * delta_xyz[..., 0] + sine * delta_xyz[..., 1]
         local_y = -sine * delta_xyz[..., 0] + cosine * delta_xyz[..., 1]
         local_xyz = torch.stack((local_x, local_y, delta_xyz[..., 2]), dim=-1)
-        relative_heading = torch.rad2deg(histories[..., 6]) - decoder_heading
+        relative_heading = (torch.rad2deg(histories[..., 6]) if legacy_heading
+                            else histories[..., 6]) - decoder_heading
 
-        features = histories.new_zeros(size, time_count, 22)
+        features = histories.new_zeros(size, time_count, feature_count)
         features[..., :3] = local_xyz
         features[..., 3] = histories[..., 5]  # length
         features[..., 4] = histories[..., 4]  # width
@@ -131,12 +157,20 @@ def pack_mtr_actor_polylines(
         center_object_index = int(torch.where(slots == center_slot)[0][0])
         features[center_object_index, :, 7] = 1.0
         features[..., 8:19] = time_one_hot[None]
-        timestamps = (
-            receiver_time_s[batch_index].to(boxes.dtype) + time_offsets
-        ) * float(timestamp_scale)
-        features[..., 19] = timestamps[None]
+        timestamps = history_time_s[batch_index, slots] * float(timestamp_scale)
+        if not legacy_heading:
+            timestamps = (history_time_s[batch_index, slots] - receiver_time_s[batch_index])
+        features[..., 19] = timestamps
         features[..., 20] = torch.sin(relative_heading)
         features[..., 21] = torch.cos(relative_heading)
+        if not legacy_heading:
+            # Original MTR WaymoDataset.generate_centered_trajs_for_agents
+            # appends actor-local observed velocity and acceleration. Retain
+            # V2V4Real's vehicle/center markers, adapting only these 4 fields.
+            velocity, acceleration = causal_motion_features(
+                local_xyz[..., :2], mask, history_time_s[batch_index, slots], frame_period_s)
+            features[..., 22:24] = velocity
+            features[..., 24:26] = acceleration
         features = torch.where(mask[..., None], features, torch.zeros_like(features))
 
         obj_trajs[row, :size] = features
